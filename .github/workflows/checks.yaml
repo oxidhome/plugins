@@ -18,21 +18,12 @@ env:
 permissions: read-all
 
 jobs:
-  BuildJob:
-    name: Build per OS
-    strategy:
-        matrix:
-            os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
-    runs-on: ${{ matrix.os }}
+  Build:
+    name: Build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: cargo build --all-features --all-targets --verbose
-  Build:
-    name: Wait for build jobs to finish
-    needs: BuildJob
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Build jobs succeeded"
   Format:
     name: Check Rust code formatting
     runs-on: ubuntu-latest
@@ -52,12 +43,9 @@ jobs:
       - run: cargo clippy --all-features --all-targets --verbose -- --deny warnings
       - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
         if: failure()
-  TestJob:
-    name: Test per OS
-    strategy:
-      matrix:
-        os: [ "ubuntu-latest", "windows-latest", "macos-latest" ]
-    runs-on: ${{ matrix.os }}
+  Tests:
+    name: Tests
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -80,12 +68,6 @@ jobs:
         uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1.2.1
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-  Tests:
-    name: Wait for testing jobs to finish
-    needs: TestJob
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Testing jobs succeeded"
   Deps:
     name: Check dependencies
     runs-on: ubuntu-latest
