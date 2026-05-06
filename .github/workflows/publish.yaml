@@ -1,0 +1,32 @@
+name: Publish
+
+on:
+  push:
+    tags: [ "**/v[0-9]+.[0-9]+.[0-9]+" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions: read-all
+
+jobs:
+  Checks:
+    uses: ./.github/workflows/checks.yaml
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+  Publish:
+    needs: Checks
+    strategy:
+      matrix:
+        crate: [ "project" ]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6.0.2 # immutable action, safe to use the versions
+      - uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+        id: auth
+      - run: cargo publish --all-features --package ${{ matrix.crate }} --verbose
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

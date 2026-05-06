@@ -1,0 +1,19 @@
+[package]
+name = "oxidhome-template-plugin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Template plugin for OxidHome — copy and rename to start a new plugin."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
+
+[lints]
+workspace = true
