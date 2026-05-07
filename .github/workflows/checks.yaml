@@ -138,10 +138,12 @@ jobs:
           path: target/package/${{ matrix.package }}-*.crate
   Publish:
     name: Test publishing
-    needs: PublishJob
+    needs:
+      - RustMeta
+      - PublishJob
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Check status
-        if: ${{ needs.PublishJob.result == 'failure' || needs.PublishJob.result == 'cancelled' }}
+        if: ${{ needs.RustMeta.outputs.publish != '[]' && (needs.PublishJob.result == 'failure' || needs.PublishJob.result == 'cancelled') }}
         run: exit 1
