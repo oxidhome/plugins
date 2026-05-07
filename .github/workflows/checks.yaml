@@ -29,12 +29,7 @@ jobs:
       publish: ${{ steps.rustmeta.outputs.publish }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      # Pre-install the toolchain pinned by rust-toolchain.toml so that
-      # the next `cargo metadata` call doesn't emit rustup install
-      # progress on stderr, which sv-tools/rust-metadata-action treats
-      # as fatal.
-      - run: cargo --version
-      - uses: sv-tools/rust-metadata-action@d63a8766643f8f53e04e41d1a6f7a92c094a05a7 # v0.2.0
+      - uses: sv-tools/rust-metadata-action@f3e4c81b5d58bb5920965e9441181788608c6c5c # v1.0.0
         id: rustmeta
   Build:
     name: Build
