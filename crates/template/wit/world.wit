@@ -7,10 +7,14 @@
 // interfaces; plugins compose what they need by importing the appropriate
 // world.
 //
-// Three plugin worlds are defined:
-//   - plugin              — standard device integrations and automations
-//   - streaming-plugin    — adds WASI sockets/HTTP for long-lived I/O
-//   - streaming-ai-plugin — adds inference for ML-driven plugins
+// Two plugin worlds are defined in this local WIT copy:
+//   - plugin    — standard device integrations and automations
+//   - ai-plugin — adds inference for ML-driven plugins
+//
+// The canonical oxidhome.wit also defines streaming-plugin and
+// streaming-ai-plugin worlds; those are omitted here because they
+// import wasi:sockets / wasi:http / wasi:clocks deps not bundled
+// with this template.
 //
 // Importing a WASI interface does NOT grant access to it. Capabilities
 // are enforced by the oxidehome-core based on the plugin manifest the user

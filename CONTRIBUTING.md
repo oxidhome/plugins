@@ -32,10 +32,10 @@ This avoids duplicate work and lets us flag issues (licensing concerns, scope mi
 
 ### 2. Build it
 
-Each plugin lives in its own subdirectory under `plugins/`. The structure for a Rust plugin:
+Each plugin lives in its own subdirectory under `crates/`. The structure for a Rust plugin:
 
 ```
-plugins/your-plugin/
+crates/your-plugin/
 ├── Cargo.toml
 ├── README.md          # what it does, what devices it supports, configuration
 ├── plugin.toml        # plugin manifest (capabilities, network targets, etc.)
