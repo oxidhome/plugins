@@ -12,8 +12,6 @@ on:
     outputs:
       publish:
         value: ${{ jobs.RustMeta.outputs.publish }}
-      rust-version:
-        value: ${{ jobs.RustMeta.outputs.rust-version }}
   schedule:
     - cron: "0 0 * * 0"
 
@@ -29,52 +27,38 @@ jobs:
     outputs:
       matrix: ${{ steps.rustmeta.outputs.matrix }}
       publish: ${{ steps.rustmeta.outputs.publish }}
-      rust-version: ${{ steps.rustmeta.outputs.rust-version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: sv-tools/rust-metadata-action@f3e4c81b5d58bb5920965e9441181788608c6c5c # v1.0.0
         id: rustmeta
   Build:
     name: Build
-    needs: RustMeta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
       - run: cargo build --all-features --all-targets --verbose
   WasmBuild:
     name: Build (wasm32-wasip2)
-    needs: RustMeta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
-          target: wasm32-wasip2
       - run: cargo build --target wasm32-wasip2 --all-features --verbose
       - run: cargo clippy --target wasm32-wasip2 --all-features --verbose -- --deny warnings
   Format:
     name: Check Rust code formatting
-    needs: RustMeta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
       - run: cargo fmt --all --check --verbose
   Clippy:
     name: Check Rust code with Clippy
-    needs: RustMeta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
       - run: cargo install-tools
       - run: cargo clippy --all-features --all-targets --verbose -- --deny warnings
       - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
@@ -89,9 +73,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
-          components: llvm-tools-preview
       - run: cargo install-tools
       - name: Run tests
         run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --no-fail-fast --no-tests=pass --verbose
@@ -121,13 +102,10 @@ jobs:
         run: exit 1
   Deps:
     name: Check dependencies
-    needs: RustMeta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
       - run: cargo install-tools
       - name: Machete
         run: cargo machete
@@ -143,8 +121,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-        with:
-          toolchain: ${{ needs.RustMeta.outputs.rust-version }}
       - name: Dry run publish
         run: cargo publish --all-features --package ${{ matrix.package }} --dry-run --verbose
       - name: Create package
