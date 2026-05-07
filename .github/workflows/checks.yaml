@@ -31,13 +31,26 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: sv-tools/rust-metadata-action@f3e4c81b5d58bb5920965e9441181788608c6c5c # v1.0.0
         id: rustmeta
-  Build:
-    name: Build
+  BuildJob:
+    name: Build per crate
+    needs: RustMeta
+    strategy:
+      matrix:
+        args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
-      - run: cargo build --all-features --all-targets --verbose
+      - run: cargo build ${{ matrix.args }} --all-targets --verbose
+  Build:
+    name: Build
+    needs: BuildJob
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check status
+        if: ${{ needs.BuildJob.result != 'success' }}
+        run: exit 1
   WasmBuild:
     name: Build (wasm32-wasip2)
     runs-on: ubuntu-latest
