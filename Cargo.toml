@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/template"]
+members = ["crates/kasa", "crates/template"]
 
 [workspace.package]
 edition = "2024"
@@ -43,6 +43,11 @@ oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "bcbdb
 # Test-only: parses `manifest.toml` the way the host does. Same version
 # as oxidhome/oxidhome so the lockfile keeps one copy.
 toml = { version = "1.1.2", default-features = false, features = ["parse", "serde", "std"] }
+# crates/kasa: Basic-auth and LINKIE2 encodings, md5 for camera auth,
+# and the device JSON.
+base64 = "0.22"
+md-5 = "0.10"
+serde_json = "1"
 
 [profile.release]
 lto = "thin"
