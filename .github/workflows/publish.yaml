@@ -2,7 +2,7 @@ name: Publish
 
 on:
   push:
-    tags: [ "**/v[0-9]+.[0-9]+.[0-9]+" ]
+    tags: [ "**/v[0-9]*.[0-9]*.[0-9]*" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +28,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       # `Checks` has already parsed the tag and checked the crate and its
       # Cargo.toml version against it; this only refuses a version that
       # is already on crates.io.

@@ -1,0 +1,19 @@
+# Phrases that describe superseded decisions or layouts. The "Check docs
+# for stale claims" job in checks.yaml fails when any repo doc contains
+# one (case-insensitive, fixed-string match).
+#
+# One phrase per line; blank lines and lines starting with # are ignored.
+# Add a phrase when a claim the docs used to make stops being true.
+
+# Plugins read the manifest from `manifest.toml` and build against
+# `oxidhome-sdk`; there is no per-plugin `plugin.toml` or local WIT copy.
+plugin.toml
+wit/world.wit
+
+# oxidhome/oxidhome ADR-0006: host resource ceilings replace "no compute
+# limits"; plugins don't declare CPU or memory budgets in the manifest.
+not limited by design
+no compute limits
+does not cap a plugin's CPU
+memory-mb
+cpu-percent
