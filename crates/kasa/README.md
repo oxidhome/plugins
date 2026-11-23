@@ -133,7 +133,8 @@ record per device (`device/<id>`, names clipped to 64 characters). Only changed 
 are written. They come back on restart before discovery runs, and follow DHCP address
 changes when discovery sees them again. If storage can't be read at start, saving waits
 until a read succeeds, so a partial discovery can't overwrite the stored list. Outlets a
-strip stops reporting are removed from the host.
+strip stops reporting are removed from the host. When another device answers at a device's address (DHCP
+reuse), nothing more is sent there until discovery finds the device again.
 
 ## Required capabilities
 

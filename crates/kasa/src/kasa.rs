@@ -111,16 +111,27 @@ struct Physical {
     /// State has been read from the device since adoption (persisted
     /// outlet states are placeholders until then).
     observed: bool,
+    /// Another device answered at this address (DHCP reuse): nothing is
+    /// sent there until discovery finds this device again.
+    address_stale: bool,
     cam: CameraState,
 }
 
 impl Physical {
     fn addr(&self) -> Option<SocketAddrV4> {
+        if self.address_stale {
+            return None;
+        }
         self.ident
             .address
             .parse::<Ipv4Addr>()
             .ok()
             .map(|ip| SocketAddrV4::new(ip, self.port))
+    }
+
+    /// The address for camera HTTPS, unless it is stale.
+    fn host(&self) -> Option<String> {
+        (!self.address_stale).then(|| self.ident.address.clone())
     }
 
     fn main_role(&self) -> Role {
@@ -204,6 +215,8 @@ pub struct Kasa<H: Host, N: Net> {
     /// The stored device list could not be read; saves wait for a read.
     inventory_unread: bool,
     tick_started_ms: u64,
+    /// Inside `tick`: only then does [`TICK_BUDGET_MS`] apply.
+    in_tick: bool,
     /// Device records as last stored, by Kasa id.
     saved: HashMap<String, String>,
     /// The index as last stored.
@@ -237,6 +250,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
             restoring: false,
             inventory_unread: false,
             tick_started_ms: 0,
+            in_tick: false,
             saved: HashMap::new(),
             saved_index: None,
             warned_full: false,
@@ -446,7 +460,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let address = d.address.to_string();
         let now = self.net.monotonic_ms();
         let mut changed = false;
+        if live {
+            self.claim_address(&d.id, &address);
+        }
         if let Some(p) = self.devices.get_mut(&d.id) {
+            if live {
+                p.address_stale = false;
+            }
             if p.ident.address != address {
                 p.ident.address.clone_from(&address);
                 changed = true;
@@ -544,6 +564,24 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
     }
 
+    /// A live reply from `kasa_id` at `address`: any other device still
+    /// recorded there has moved, so commands must not reach this one.
+    fn claim_address(&mut self, kasa_id: &str, address: &str) {
+        let mut moved = Vec::new();
+        for (id, p) in &mut self.devices {
+            if id != kasa_id && p.ident.address == address && !p.address_stale {
+                p.address_stale = true;
+                moved.push(p.ident.name.clone());
+            }
+        }
+        for name in moved {
+            self.log(
+                Level::Warn,
+                &format!("{name}: another device now answers at {address}; waiting for discovery"),
+            );
+        }
+    }
+
     /// State for a device seen for the first time.
     fn new_physical(&mut self, d: &Discovered, class: KasaClass, live: bool, now: u64) -> Physical {
         let mut jitter = [0u8; 4];
@@ -595,6 +633,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
             reading: None,
             unreachable: false,
             observed: false,
+            address_stale: false,
             cam: CameraState {
                 motion_backoff_ms: camera::MOTION_POLL_MS,
                 ..CameraState::default()
@@ -765,11 +804,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 }
             }
             KasaClass::Strip => {
-                let children = self
-                    .devices
-                    .get(kasa_id)
-                    .map_or_default(|p| p.children.clone());
-                for c in children {
+                // Only states this reply carries: cached ones may be
+                // restore placeholders or stale after an ambiguous write.
+                for c in bounded_children(&s.children) {
                     let r = Role::Outlet {
                         child_id: c.id.clone(),
                     };
@@ -854,6 +891,24 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 return;
             }
         };
+        if let Some(other) = s
+            .device_id
+            .as_deref()
+            .filter(|i| !i.is_empty() && *i != kasa_id)
+        {
+            // DHCP gave this address to another device.
+            if let Some(p) = self.devices.get_mut(kasa_id) {
+                p.address_stale = true;
+                let name = p.ident.name.clone();
+                self.log(
+                    Level::Warn,
+                    &format!(
+                        "{name}: device {other} answers at its address; waiting for discovery"
+                    ),
+                );
+            }
+            return;
+        }
         if let Some(p) = self.devices.get_mut(kasa_id)
             && p.unreachable
         {
@@ -863,10 +918,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
         self.apply_sysinfo(kasa_id, &s);
         if emeter {
-            // History is 2–3 more exchanges; when the tick is out of
-            // budget it stays due and runs on a later poll.
-            let with_history = due_history && !self.over_budget();
-            self.poll_energy(kasa_id, addr, with_history, now);
+            // Every energy exchange checks the tick budget; unfinished
+            // history stays due and runs on a later poll.
+            self.poll_energy(kasa_id, addr, due_history, now);
         }
     }
 
@@ -880,6 +934,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
         with_history: bool,
         now: u64,
     ) -> (bool, Vec<KeyValue>) {
+        if self.over_budget() {
+            return (false, Vec::new());
+        }
         let reading = self
             .iot_call(addr, &iot::get_emeter_realtime())
             .ok()
@@ -908,13 +965,21 @@ impl<H: Host, N: Net> Kasa<H, N> {
         (reading.is_some(), fields)
     }
 
+    /// `None` when a read fails or the tick runs out of budget between
+    /// exchanges; the history then stays due for a later poll.
     fn fetch_history(&mut self, addr: SocketAddrV4) -> Option<EnergyHistory> {
+        if self.over_budget() {
+            return None;
+        }
         let today = self
             .iot_call(addr, &iot::get_time())
             .ok()
             .and_then(|v| iot::parse_time_reply(&v).ok().flatten())?;
         let mut stats = Vec::new();
         for req in iot::energy_history_requests(today) {
+            if self.over_budget() {
+                return None;
+            }
             let v = self.iot_call(addr, &req).ok()?;
             let (d, m) = iot::parse_energy_stats(&v);
             stats.extend(d);
@@ -934,7 +999,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let host = self
             .devices
             .get(kasa_id)
-            .map(|p| p.ident.address.clone())
+            .and_then(Physical::host)
             .ok_or(CamError::NoAddress)?;
         let mut rnd = [0u8; 16];
         self.net.random(&mut rnd);
@@ -974,11 +1039,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
             }
         };
         let ptz = camera::parse_ptz_capability(&reply);
+        // `None` when the read failed: keep the last good list.
         let presets = if ptz.is_some() {
             self.linkie(kasa_id, &camera::get_presets())
-                .map_or_default(|v| camera::parse_presets(&v))
+                .ok()
+                .and_then(|v| camera::parse_presets(&v))
         } else {
-            Vec::new()
+            None
         };
         let Some(p) = self.devices.get_mut(kasa_id) else {
             return;
@@ -1005,7 +1072,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 reregister = true;
             }
             p.cam.ptz = Some(c);
-            p.cam.presets = presets;
+            if let Some(list) = presets {
+                p.cam.presets = list;
+            }
         }
         let states: Vec<(OnOffFeature, bool)> =
             p.cam.features.iter().map(|(f, v)| (*f, *v)).collect();
@@ -1210,6 +1279,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// due polls, pump streams.
     pub fn tick(&mut self) {
         self.tick_started_ms = self.net.monotonic_ms();
+        self.in_tick = true;
         if self.inventory_unread {
             self.restore();
         }
@@ -1271,6 +1341,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
         self.pump_streams();
         self.flush();
+        self.in_tick = false;
     }
 
     // ── Commands ──────────────────────────────────────────────────────
@@ -1453,7 +1524,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 };
                 Ok(CameraOp::Set(*f, value))
             }
-            (Role::Camera, _, "set", Some(Ext::StatusLed)) => {
+            (Role::Camera, _, "set", Some(Ext::StatusLed)) if p.features.led => {
                 let on = args::bool(a, "on")
                     .ok_or_else(|| invalid("status-led::set requires `on: bool`"))?;
                 Ok(CameraOp::Set(OnOffFeature::Led, on))
@@ -1496,7 +1567,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
 
     /// Whether this tick has used its [`TICK_BUDGET_MS`].
     fn over_budget(&self) -> bool {
-        self.net.monotonic_ms().saturating_sub(self.tick_started_ms) >= TICK_BUDGET_MS
+        self.in_tick
+            && self.net.monotonic_ms().saturating_sub(self.tick_started_ms) >= TICK_BUDGET_MS
     }
 
     /// Runs queued camera commands in order, as far as the tick budget
@@ -1595,7 +1667,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
         else {
             return unavailable(CamError::NoCredentials.to_string());
         };
-        let Some(host) = self.devices.get(kasa_id).map(|p| p.ident.address.clone()) else {
+        let Some(host) = self.devices.get(kasa_id).and_then(Physical::host) else {
             return unavailable("device is gone");
         };
         let req = camera::snapshot_request(&host, camera::STREAM_PORT, &stream_auth(&user, &pass));
@@ -1660,8 +1732,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let host = self
             .devices
             .get(kasa_id)
-            .map(|p| p.ident.address.clone())
-            .ok_or("device is gone")?;
+            .and_then(Physical::host)
+            .ok_or("device is gone or its address is stale")?;
         let req = multipart::stream_request(&host, camera::STREAM_PORT, &stream_auth(&user, &pass));
         let (head, body) = self
             .net
@@ -1868,6 +1940,7 @@ fn color_request(
         ));
     };
     let value = match args::number(args, "value") {
+        None if args::has(args, "value") => return Err(invalid("`value` must be a number")),
         None => prev.brightness.map_or(1.0, |b| f64::from(b) / 100.0),
         Some(x) if (0.0..=1.0).contains(&x) => x,
         Some(_) => return Err(invalid("`value` must be in [0, 1]")),

@@ -131,9 +131,15 @@ pub fn audio_pipe_config() -> PluginPipeConfig {
     }
 }
 
-/// A sink name from a camera id: `[a-z0-9_-]{1,64}`.
+/// A sink name from a camera id: `[a-z0-9_-]{1,64}`. The readable part is
+/// lossy (case, punctuation, length), so a hash of the full id keeps two
+/// cameras from sharing a sink or a snapshot blob.
 #[must_use]
 pub fn sink_name(kasa_id: &str) -> String {
+    // FNV-1a: stable across builds, which `DefaultHasher` isn't.
+    let hash = kasa_id.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
     let mut s: String = format!("kasa-{kasa_id}")
         .chars()
         .map(|c| {
@@ -145,8 +151,8 @@ pub fn sink_name(kasa_id: &str) -> String {
             }
         })
         .collect();
-    s.truncate(64);
-    s
+    s.truncate(64 - 9);
+    format!("{s}-{hash:08x}")
 }
 
 /// What `setup-pipeline` returns for a camera: the video plugin pipe,
@@ -410,7 +416,8 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(&p.sinks[1], OutputSink::Rtsp(n) if n == "kasa-80de-ad"));
+        assert!(matches!(&p.sinks[1], OutputSink::Rtsp(n) if n.starts_with("kasa-80de-ad-")));
+        assert_ne!(sink_name("cam.1"), sink_name("cam-1"));
         assert!(matches!(p.activation, ActivationPolicy::OnDemand));
         assert_eq!(sink_name(&"x".repeat(100)).len(), 64);
         assert!(matches!(

@@ -187,14 +187,16 @@ pub struct PtzPreset {
 /// Parses `ptz.get_all_preset`. The entry shape isn't documented: read
 /// `index` and `name` when present, else use the 1-based position.
 #[must_use]
-pub fn parse_presets(reply: &Value) -> Vec<PtzPreset> {
-    let Ok(v) = ok_result(reply, &format!("{MODULE_PREFIX}ptz"), "get_all_preset") else {
-        return Vec::new();
-    };
+pub fn parse_presets(reply: &Value) -> Option<Vec<PtzPreset>> {
+    let v = ok_result(reply, &format!("{MODULE_PREFIX}ptz"), "get_all_preset").ok()?;
     let Some(Value::Array(list)) = v.get("preset_attr") else {
-        return Vec::new();
+        return None;
     };
-    list.iter()
+    // Bounded: the list is published in one state field, which the host
+    // caps.
+    let presets = list
+        .iter()
+        .take(MAX_PRESETS)
         .enumerate()
         .map(|(i, p)| {
             let index = p
@@ -203,11 +205,20 @@ pub fn parse_presets(reply: &Value) -> Vec<PtzPreset> {
                 .unwrap_or_else(|| i64::try_from(i + 1).unwrap_or(i64::MAX));
             let name = get_str(p, "name")
                 .filter(|n| !n.trim().is_empty())
-                .map_or_else(|| format!("Viewpoint {index}"), str::to_string);
+                .map_or_else(
+                    || format!("Viewpoint {index}"),
+                    |n| n.chars().take(MAX_PRESET_NAME).collect(),
+                );
             PtzPreset { index, name }
         })
-        .collect()
+        .collect();
+    Some(presets)
 }
+
+/// Most presets kept per camera (the app allows far fewer).
+pub const MAX_PRESETS: usize = 32;
+/// Longest preset name kept, in characters.
+pub const MAX_PRESET_NAME: usize = 64;
 
 /// `set_move` directions: lowercase, `top`/`bottom` (not up/down, which
 /// answer `-41203`).
@@ -508,7 +519,7 @@ mod tests {
         let presets = json!({"smartlife.cam.ipcamera.ptz":{"get_all_preset":{"err_code":0,
             "preset_attr":[{"index":3,"name":"Door"},{"name":"  "},{}]}}});
         assert_eq!(
-            parse_presets(&presets),
+            parse_presets(&presets).unwrap(),
             vec![
                 PtzPreset {
                     index: 3,
@@ -524,7 +535,18 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(parse_presets(&fixed), []);
+        assert_eq!(
+            parse_presets(&fixed),
+            None,
+            "a failed read is not an empty list"
+        );
+        let many: Vec<Value> = (0..100)
+            .map(|i| json!({"index": i, "name": "n".repeat(500)}))
+            .collect();
+        let big = json!({"smartlife.cam.ipcamera.ptz":{"get_all_preset":{"err_code":0,"preset_attr":many}}});
+        let p = parse_presets(&big).unwrap();
+        assert_eq!(p.len(), MAX_PRESETS);
+        assert_eq!(p[0].name.chars().count(), MAX_PRESET_NAME);
         assert_eq!(
             ptz_move(PtzDirection::Top, 0).to_json(),
             r#"{"smartlife.cam.ipcamera.ptz":{"set_move":{"direction":"top","speed":1}}}"#

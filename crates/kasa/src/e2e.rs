@@ -618,7 +618,7 @@ fn camera_commands_are_accepted_then_completed() {
     let done: Vec<&(String, CommandResult)> = k.host.completed.iter().rev().take(2).collect();
     assert!(matches!(done[1], (id, CommandResult::Ok) if id == "r1"));
     assert!(matches!(&done[0].1, CommandResult::OkWithState(_)));
-    assert_eq!(k.host.blobs[0].0, "snapshot-kasa-cam1.jpg");
+    assert_eq!(k.host.blobs[0].0, "snapshot-kasa-cam1-08419f47.jpg");
     assert_eq!(k.host.blobs[0].2, "image/jpeg");
 
     // Device-side refusal → err; HTTP 401 → permission-denied; timeout → unknown.
@@ -1175,4 +1175,85 @@ fn partial_bulb_reply_keeps_color_and_ptz_range_is_checked() {
         matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
         "{r:?}"
     );
+}
+
+#[test]
+fn partial_strip_reply_publishes_no_outlet_state() {
+    let k = discovered(&[], vec![(STRIP, strip())]);
+    let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
+    host.storage = k.host.storage.clone();
+    let mut net = FakeNet::default();
+    let mut s = strip();
+    s.sysinfo.as_object_mut().unwrap().remove("children");
+    net.iot.insert(STRIP, s);
+    let mut k = Kasa::new(host, net);
+    k.init();
+    k.net.advance(60_000);
+    k.tick();
+    let outlet = id(&k, "STRIP/outlet-00");
+    assert!(
+        k.host.events_for(&outlet, cap::SWITCH).is_empty(),
+        "no placeholder state"
+    );
+}
+
+#[test]
+fn reused_address_stops_commands_to_the_old_device() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    let old = id(&k, "PLUG1");
+    // DHCP hands the plug's address to another plug.
+    let mut other = plug();
+    other.sysinfo["deviceId"] = json!("PLUG2");
+    k.net.iot.insert(PLUG, other);
+    k.net.advance(60_000);
+    k.tick();
+    let sent = k.net.tcp_count;
+    let on = vec![kv("state", Value::BoolVal(true))];
+    let r = k.execute_command(&old, &cmd("x", cap::SWITCH, "set", on));
+    assert!(
+        matches!(r, CommandResult::Err(Error::Unavailable(_))),
+        "{r:?}"
+    );
+    assert_eq!(k.net.tcp_count, sent, "nothing sent to the other plug");
+    assert_eq!(k.net.iot[&PLUG].sysinfo["relay_state"], json!(0));
+}
+
+#[test]
+fn energy_history_respects_the_tick_budget() {
+    let k = discovered(&[], vec![(PLUG, plug())]);
+    let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
+    host.storage = k.host.storage.clone();
+    let mut net = FakeNet::default();
+    net.iot.insert(PLUG, plug());
+    let mut k = Kasa::new(host, net);
+    k.init();
+    k.net.advance(60_000);
+    // Every exchange takes 4 s: sysinfo, realtime, time and two history
+    // reads would be 20 s.
+    k.net.latency_ms = 4_000;
+    let start = k.net.now_ms;
+    k.tick();
+    assert!(
+        k.net.now_ms - start <= crate::kasa::TICK_BUDGET_MS,
+        "{} ms",
+        k.net.now_ms - start
+    );
+}
+
+#[test]
+fn malformed_hsv_value_is_refused() {
+    let mut k = discovered(&[], vec![(BULB, bulb())]);
+    let lamp = id(&k, "BULB1");
+    let sent = k.net.tcp_count;
+    let args = vec![
+        kv("hue", Value::FloatVal(0.5)),
+        kv("saturation", Value::FloatVal(0.5)),
+        kv("value", Value::StringVal("bad".into())),
+    ];
+    let r = k.execute_command(&lamp, &cmd("h", cap::COLOR_LIGHT, "set", args));
+    assert!(
+        matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
+        "{r:?}"
+    );
+    assert_eq!(k.net.tcp_count, sent);
 }
