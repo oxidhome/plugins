@@ -159,7 +159,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Broken intra-doc links, bare URLs and malformed HTML in doc
-      # comments are warnings by default; make them fatal here.
+      # comments are warnings by default; docs.rs renders them wrong
+      # rather than failing, so make them fatal here instead.
       RUSTDOCFLAGS: --deny warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
