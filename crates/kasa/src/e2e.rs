@@ -1257,3 +1257,37 @@ fn malformed_hsv_value_is_refused() {
     );
     assert_eq!(k.net.tcp_count, sent);
 }
+
+#[test]
+fn stale_address_survives_restart_and_mac_identifies_devices() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    // The replacement reports no deviceId, only a different MAC.
+    let mut other = plug();
+    other.sysinfo.as_object_mut().unwrap().remove("deviceId");
+    other.sysinfo["mac"] = json!("11:22:33:44:55:66");
+    k.net.iot.insert(PLUG, other.clone());
+    k.net.advance(60_000);
+    k.tick();
+    let old = id(&k, "PLUG1");
+    let on = vec![kv("state", Value::BoolVal(true))];
+    let r = k.execute_command(&old, &cmd("a", cap::SWITCH, "set", on.clone()));
+    assert!(
+        matches!(r, CommandResult::Err(Error::Unavailable(_))),
+        "{r:?}"
+    );
+
+    // After a restart (no discovery yet) the address is still refused.
+    let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
+    host.storage = k.host.storage.clone();
+    let mut net = FakeNet::default();
+    net.iot.insert(PLUG, other);
+    let mut k2 = Kasa::new(host, net);
+    k2.init();
+    let old = id(&k2, "PLUG1");
+    let r = k2.execute_command(&old, &cmd("b", cap::SWITCH, "set", on));
+    assert!(
+        matches!(r, CommandResult::Err(Error::Unavailable(_))),
+        "{r:?}"
+    );
+    assert_eq!(k2.net.tcp_count, 0);
+}

@@ -279,10 +279,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
         // Replaying must not save: an interruption mid-way would leave a
         // truncated list behind.
         self.restoring = true;
-        for d in self.load_persisted() {
+        for (d, stale) in self.load_persisted() {
             // A retried read must not undo what was learned meanwhile.
             if !self.devices.contains_key(&d.id) {
                 self.adopt(&d, false);
+                if let Some(p) = self.devices.get_mut(&d.id) {
+                    p.address_stale = stale;
+                }
             }
         }
         self.restoring = false;
@@ -320,7 +323,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// saves (see `inventory_unread`) and is retried next tick: saving
     /// now would replace the stored list with only the devices that happen
     /// to be online.
-    fn load_persisted(&mut self) -> Vec<Discovered> {
+    /// Stored devices, each with whether its address was known stale.
+    fn load_persisted(&mut self) -> Vec<(Discovered, bool)> {
         match self.read_inventory() {
             Ok(list) => {
                 self.inventory_unread = false;
@@ -339,7 +343,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
     }
 
-    fn read_inventory(&mut self) -> Result<Vec<Discovered>, Error> {
+    fn read_inventory(&mut self) -> Result<Vec<(Discovered, bool)>, Error> {
         let Some(Value::JsonVal(s)) = self.host.storage_get(STORAGE_KEY)? else {
             return Ok(Vec::new());
         };
@@ -357,8 +361,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
             };
             let parsed = serde_json::from_str::<Json>(&rec).ok();
             if let Some(d) = parsed.as_ref().and_then(parse_record) {
+                let stale = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("address_stale"))
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false);
                 self.saved.insert(id.to_string(), rec);
-                out.push(d);
+                out.push((d, stale));
             }
         }
         // The index as stored, so an unchanged list isn't rewritten.
@@ -442,6 +451,11 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// Adopts a discovered device: registers it on first sight, follows an
     /// address change, and applies the state in the reply.
     fn adopt(&mut self, d: &Discovered, live: bool) {
+        // Whoever answers here, the address no longer belongs to another
+        // adopted device; checked before any admission rule.
+        if live && !d.id.is_empty() {
+            self.claim_address(&d.id, &d.address.to_string());
+        }
         let Some(class) = d.class else {
             return;
         };
@@ -460,12 +474,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let address = d.address.to_string();
         let now = self.net.monotonic_ms();
         let mut changed = false;
-        if live {
-            self.claim_address(&d.id, &address);
-        }
         if let Some(p) = self.devices.get_mut(&d.id) {
-            if live {
-                p.address_stale = false;
+            if live && std::mem::take(&mut p.address_stale) {
+                changed = true;
             }
             if p.ident.address != address {
                 p.ident.address.clone_from(&address);
@@ -573,6 +584,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 p.address_stale = true;
                 moved.push(p.ident.name.clone());
             }
+        }
+        if !moved.is_empty() {
+            self.mark_dirty();
         }
         for name in moved {
             self.log(
@@ -891,12 +905,19 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 return;
             }
         };
-        if let Some(other) = s
-            .device_id
-            .as_deref()
-            .filter(|i| !i.is_empty() && *i != kasa_id)
-        {
+        let other = if let Some(i) = s.device_id.as_deref().filter(|i| !i.is_empty()) {
+            (i != kasa_id).then(|| i.to_string())
+        } else {
+            // No device id: devices adopted by MAC are checked by MAC.
+            let stored = self.devices.get(kasa_id).and_then(|p| p.ident.mac.clone());
+            match (stored, s.mac.as_deref()) {
+                (Some(a), Some(b)) if norm_mac(&a) != norm_mac(b) => Some(b.to_string()),
+                _ => None,
+            }
+        };
+        if let Some(other) = other {
             // DHCP gave this address to another device.
+            self.mark_dirty();
             if let Some(p) = self.devices.get_mut(kasa_id) {
                 p.address_stale = true;
                 let name = p.ident.name.clone();
@@ -1150,8 +1171,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 p.cam.motion.observe(moving, now);
             }
             Err(CamError::Linkie(e)) if e.code() == Some(err::CAMERA_OFF) => {
-                // Turned off outside the plugin; the state poll catches up.
-                p.cam.features.insert(OnOffFeature::CameraEnabled, false);
+                // Turned off outside the plugin; the state poll catches up
+                // (as in the TS plugin, this doesn't decide privacy support).
                 p.cam.next_motion_ms = now + camera::MOTION_POLL_PRIVACY_MS;
                 p.cam.motion.clear();
             }
@@ -1744,10 +1765,14 @@ impl<H: Host, N: Net> Kasa<H, N> {
             .host
             .open_pipe(media::video_pipe_config())
             .map_err(|e| format!("open-pipe: {e:?}"))?;
-        let audio = self
-            .host
-            .open_pipe(media::audio_pipe_config())
-            .map_err(|e| format!("open-pipe: {e:?}"))?;
+        let mut video = video;
+        let audio = match self.host.open_pipe(media::audio_pipe_config()) {
+            Ok(a) => a,
+            Err(e) => {
+                video.close();
+                return Err(format!("open-pipe: {e:?}"));
+            }
+        };
         let mut seeds = [0u8; 16];
         self.net.random(&mut seeds);
         let word =
@@ -1973,6 +1998,14 @@ fn remember_light(light: &mut iot::LightState, fields: &[KeyValue]) {
     }
 }
 
+/// A MAC without separators, uppercased, for comparing spellings.
+fn norm_mac(mac: &str) -> String {
+    mac.chars()
+        .filter(char::is_ascii_hexdigit)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
 /// One adopted device as stored: the sysinfo fields that rebuild it.
 fn record(id: &str, p: &Physical) -> Json {
     let mut sys = json!({
@@ -1999,7 +2032,14 @@ fn record(id: &str, p: &Physical) -> Json {
     if p.features.led {
         sys["led_off"] = json!(0);
     }
-    json!({ "id": id, "class": p.class.as_str(), "address": p.ident.address, "sysinfo": sys })
+    let mut rec =
+        json!({ "id": id, "class": p.class.as_str(), "address": p.ident.address, "sysinfo": sys });
+    // Survives a restart: the address must not become writable again
+    // until discovery finds the device.
+    if p.address_stale {
+        rec["address_stale"] = json!(true);
+    }
+    rec
 }
 
 fn parse_record(e: &Json) -> Option<Discovered> {
