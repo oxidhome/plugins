@@ -89,7 +89,7 @@ cargo deny check all
 
 Tests run natively. Host imports (`host::register_device`, `host::config::get_typed`, …) only work inside the host, so keep protocol parsing and state logic in plain functions you can unit-test, and test the manifest with `oxidhome-manifest` the way the template does. For end-to-end tests, `oxidhome/oxidhome` has `oxidhome-test-host`, which loads a built component into the real runtime inside a `#[test]`.
 
-To try a plugin in the host, put `manifest.toml` and the built `.wasm` in one directory (named by `runtime.wasm` in the manifest) and pass that directory to the daemon from an `oxidhome/oxidhome` checkout: `cargo run -p oxidhome-core -- <dir>`.
+To try a plugin in the host, put `manifest.toml` and the built `.wasm` in one directory (named by `runtime.wasm` in the manifest) and pass that directory to the daemon from an `oxidhome/oxidhome` checkout: `cargo run -p oxidhome-core -- <dir>`. That shortcut starts the plugin with its manifest defaults only, so a plugin with required settings (for example a `secret` without a default) fails config validation there; install it through the host API and start it with config overrides instead.
 
 ## How to contribute a plugin
 
