@@ -205,6 +205,8 @@ jobs:
     name: Tests per crate
     needs: RustMeta
     strategy:
+      # Let every row finish and store its reports for `Coverage`.
+      fail-fast: false
       matrix:
         args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
     runs-on: ubuntu-latest
@@ -213,7 +215,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo install-tools
       - name: Run tests
-        run: cargo llvm-cov nextest ${{ matrix.args }} --all-features --all-targets --locked --no-fail-fast --no-tests=pass --verbose
+        run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --locked --no-fail-fast --no-tests=pass --verbose
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov

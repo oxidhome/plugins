@@ -38,8 +38,9 @@ cargo nextest run -p oxidhome-template-plugin
 ```
 
 The test parses and validates `manifest.toml` with the host's
-`oxidhome-manifest` crate at the pinned oxidhome revision, so a manifest
-the host would refuse fails here first.
+`oxidhome-manifest` crate at the pinned oxidhome revision, so schema and
+validation errors fail here first. The host's `sdk_version`
+compatibility check runs only when it loads the plugin.
 
 ## Run it in the host
 

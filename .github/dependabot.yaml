@@ -12,9 +12,3 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-    groups:
-      # `oxidhome-sdk` and `oxidhome-manifest` come from the same
-      # oxidhome/oxidhome commit and have to move together.
-      oxidhome:
-        patterns:
-          - "oxidhome-*"

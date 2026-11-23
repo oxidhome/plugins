@@ -61,7 +61,7 @@ To move to a newer `oxidhome/oxidhome` commit:
 3. Build, lint and test everything (see below). Fix what the new contract breaks; check the SDK changelog and `examples/` in `oxidhome/oxidhome` for how the API moved, and bump `sdk_version` in each `manifest.toml` when the `oxidhome:plugin` package version changes.
 4. Open the bump as its own PR.
 
-Dependabot groups `oxidhome-*` updates so both crates move together.
+Dependabot doesn't move a `rev` pinned to a full SHA, so bumps are always manual.
 
 ## Building and testing
 
@@ -139,7 +139,7 @@ Commits use short scoped subjects (`feat(kasa): …`, `fix: …`, `ci: …`) and
 - Tests cover the main flows
 - License headers match the repo's licensing
 
-The required status check is **All checks**, which aggregates every CI job.
+The required status check is **All checks**, which aggregates every CI job except the informational Codecov upload.
 
 ## Plugin standards
 
@@ -150,6 +150,7 @@ Plugins declare what they need in `manifest.toml`; anything not declared is refu
 ```toml
 [capabilities]
 # Outbound network rules: proto://host[:port], with CIDRs and wildcards.
+# Parsed and validated today; see the note below before relying on them.
 network = ["udp://192.168.0.0/16:9999", "tcp://192.168.0.0/16:9999"]
 storage_quota_kb = 64              # KV storage; 0 or absent = no storage
 declares_devices = ["switch", "sensor"]
@@ -160,9 +161,13 @@ type = "string"
 description = "Device address."
 
 [config.password]
-type = "secret"                    # masked everywhere; never has a default
+type = "secret"                    # never has a default
 description = "Cloud account password."
 ```
+
+The standard `plugin` world, which is what the SDK builds today, has no raw I/O: no sockets, and the host leaves WASI networking off. `network` rules are parsed and validated at install, but they only grant access in the socket-capable `streaming-plugin` worlds, which the host doesn't load yet. A plugin that has to talk to devices on the LAN can't do it from the `plugin` world.
+
+A `secret` field's value reaches the owning plugin in plain text through `host::config`; the host masks it in its API and scrubs it from plugin log output on a best-effort basis. Never log a credential or put one in an error message, event or device state.
 
 Plugins that request broad capabilities (any host, large storage quotas, other plugins' services) will get extra scrutiny. The default expectation is **least privilege**. CPU and memory aren't manifest settings: the host applies the same fixed resource ceilings to every instance.
 
