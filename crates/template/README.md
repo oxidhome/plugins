@@ -8,8 +8,8 @@ built on `oxidhome-sdk` the same way as `examples/simulated-switch` in
   (manifest default `false`) and registers one device, `switch-1`, with
   the `switch` capability.
 - On `execute_command`: `switch::set { state: bool }` sets the state,
-  `switch::toggle` flips it, and both answer `ok-with-state` with the new
-  `state`. Any other capability or action is refused with
+  `switch::toggle` flips it. Both publish a `state-changed` event and
+  answer `ok-with-state` with the new `state`. Any other capability or action is refused with
   `invalid-argument`; a command for a device this instance doesn't own
   gets `not-found`.
 - On `shutdown`: removes the device again.

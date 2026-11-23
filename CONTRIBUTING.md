@@ -58,7 +58,7 @@ To move to a newer `oxidhome/oxidhome` commit:
 
 1. Set both `rev`s in the root `Cargo.toml` to the new full commit SHA (a commit on `main`).
 2. Run `cargo update -p oxidhome-sdk -p oxidhome-manifest` and commit the `Cargo.lock` change with it.
-3. Build, lint and test everything (see below). Fix what the new contract breaks; check the SDK changelog and `examples/` in `oxidhome/oxidhome` for how the API moved, and bump `sdk_version` in each `manifest.toml` when the `oxidhome:plugin` package version changes.
+3. Build, lint and test everything (see below). Fix what the new contract breaks; the commits between the two revs and `examples/` in `oxidhome/oxidhome` show how the API moved, and set `sdk_version` in each `manifest.toml` to the pinned `oxidhome-sdk` crate version (`cargo pkgid oxidhome-sdk`).
 4. Open the bump as its own PR.
 
 Dependabot doesn't move a `rev` pinned to a full SHA, so bumps are always manual.
@@ -79,7 +79,7 @@ Run what CI runs:
 ```sh
 cargo fmt --all --check
 cargo clippy --all-features --all-targets -- -D warnings
-cargo clippy --target wasm32-wasip2 --all-features --all-targets -- -D warnings
+cargo clippy --target wasm32-wasip2 --all-features --lib -- -D warnings
 cargo nextest run --all-features --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo build --workspace --target wasm32-wasip2 --locked
@@ -145,7 +145,7 @@ The required status check is **All checks**, which aggregates every CI job excep
 
 ### Capabilities
 
-Plugins declare what they need in `manifest.toml`; anything not declared is refused by the host with `permission-denied`:
+Plugins declare what they need in `manifest.toml`. Capability-gated host calls (device registration, event subscription, storage, blob store, services) return `permission-denied` unless the manifest declares them:
 
 ```toml
 [capabilities]

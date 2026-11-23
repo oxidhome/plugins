@@ -7,7 +7,8 @@
 //! - `init` reads per-instance config declared in `manifest.toml` and
 //!   registers a device with the host;
 //! - `execute_command` matches `(capability, action)`, updates the
-//!   device and answers with an explicit outcome;
+//!   device, publishes a `state-changed` event and answers with an
+//!   explicit outcome;
 //! - `shutdown` removes the device again.
 
 use oxidhome_sdk::bindings::oxidhome::plugin::capabilities::{
@@ -91,12 +92,18 @@ impl Plugin for Template {
                 )));
             }
         };
-        oxidhome_sdk::tracing::info!(state = self.state, "switch state changed");
-        // The host projects these fields into the device's stored state.
-        CommandResult::OkWithState(vec![KeyValue {
+        let fields = vec![KeyValue {
             key: "state".to_string(),
             value: Value::BoolVal(self.state),
-        }])
+        }];
+        // The reply updates the host's stored device state; the event tells
+        // subscribers about the change. Publishing is best effort: the
+        // command already succeeded.
+        if let Err(e) = host::publish_state_change(device, "switch", fields.clone()) {
+            oxidhome_sdk::tracing::warn!("publish_state_change failed: {e:?}");
+        }
+        oxidhome_sdk::tracing::info!(state = self.state, "switch state changed");
+        CommandResult::OkWithState(fields)
     }
 }
 

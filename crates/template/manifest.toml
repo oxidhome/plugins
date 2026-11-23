@@ -10,7 +10,7 @@ source = "https://github.com/oxidhome/plugins/tree/main/crates/template"
 license = "MIT OR Apache-2.0"
 keywords = ["template", "switch"]
 world = "plugin"
-# The `oxidhome:plugin` contract version the pinned SDK implements.
+# Version of the pinned `oxidhome-sdk` crate (`cargo pkgid oxidhome-sdk`).
 sdk_version = "0.1.0"
 
 [runtime]

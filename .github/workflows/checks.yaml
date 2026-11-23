@@ -111,7 +111,9 @@ jobs:
           toolchain: ${{ needs.RustMeta.outputs.rust-version }}
           target: wasm32-wasip2
       - run: cargo check --workspace --all-features --all-targets --locked --verbose
-      - run: cargo check --workspace --target wasm32-wasip2 --all-features --all-targets --locked --verbose
+      # `--lib` on wasm: a plugin's tests run natively, and test-only
+      # dependencies (e.g. oxidhome-test-host) don't build for wasm32-wasip2.
+      - run: cargo check --workspace --target wasm32-wasip2 --all-features --lib --locked --verbose
   Build:
     name: Build
     needs:
@@ -147,8 +149,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo install-tools
-      - run: cargo clippy --target wasm32-wasip2 --all-features --all-targets --verbose -- --deny warnings
-      - run: cargo clippy --target wasm32-wasip2 --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
+      # `--lib`: the component is what ships for wasm32-wasip2; tests and
+      # their dependencies are native-only (see `MSRV`).
+      - run: cargo clippy --target wasm32-wasip2 --all-features --lib --verbose -- --deny warnings
+      - run: cargo clippy --target wasm32-wasip2 --all-features --lib --quiet --message-format=json | cargo-action-fmt
         if: failure()
   Docs:
     name: Check rustdoc
