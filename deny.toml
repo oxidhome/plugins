@@ -88,6 +88,12 @@ ignore = [
 # List of explicitly allowed licenses
 # See https://spdx.org/licenses/ for list of possible licenses
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
+#
+# Only what the dependency graph needs today; an unused entry is a
+# cargo-deny warning. Zlib and Unicode-3.0 come in transitively through
+# `wit-bindgen` (foldhash, unicode-ident); both are OSI-approved and
+# FSF-Free. Plugins pulling in more host-like dependencies can extend
+# this list the way oxidhome/oxidhome's deny.toml does.
 allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
@@ -215,12 +221,14 @@ skip-tree = [
 unknown-registry = "warn"
 # Lint level for what to happen when a crate from a git repository that is not
 # in the allow list is encountered
-unknown-git = "warn"
+unknown-git = "deny"
 # List of URLs for allowed crate registries. Defaults to the crates.io index
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # List of URLs for allowed Git repositories
-allow-git = []
+# The OxidHome SDK and manifest crates are unpublished, so plugins take
+# them from git (see the root Cargo.toml). Nothing else may.
+allow-git = ["https://github.com/oxidhome/oxidhome"]
 
 [sources.allow-org]
 # 1 or more github.com organizations to allow git sources for

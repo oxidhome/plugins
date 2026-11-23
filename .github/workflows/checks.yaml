@@ -17,7 +17,7 @@ on:
       tag-version:
         value: ${{ jobs.RustMeta.outputs.tag-version }}
   schedule:
-    - cron: "0 0 * * 0"
+    - cron: "0 4 * * 1"   # Mondays 04:00 UTC, same as oxidhome/oxidhome
 
 env:
   CARGO_TERM_COLOR: always
@@ -84,7 +84,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
   BuildJob:
-    name: Build per crate
+    name: Build per crate for wasm32-wasip2
     needs: RustMeta
     strategy:
       matrix:
@@ -92,8 +92,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-      - run: cargo build ${{ matrix.args }} --target wasm32-wasip2 --all-targets --verbose
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      # Plugins ship as wasm32-wasip2 components. `--locked` so a drifted
+      # lockfile (including the pinned oxidhome git rev) fails CI loudly
+      # instead of being silently resolved on the runner.
+      - run: cargo build ${{ matrix.args }} --target wasm32-wasip2 --locked --verbose
   MSRV:
     name: Check the minimum supported Rust version
     needs: RustMeta
@@ -103,14 +106,19 @@ jobs:
       # `rust-version` is the highest `rust-version` any crate declares.
       # The action sets it as a `rustup override`, which wins over
       # `rust-toolchain.toml`.
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           toolchain: ${{ needs.RustMeta.outputs.rust-version }}
           target: wasm32-wasip2
-      - run: cargo check --workspace --all-features --all-targets --target wasm32-wasip2 --verbose
+      - run: cargo check --workspace --all-features --all-targets --locked --verbose
+      # `--lib` on wasm: a plugin's tests run natively, and test-only
+      # dependencies (e.g. oxidhome-test-host) don't build for wasm32-wasip2.
+      - run: cargo check --workspace --target wasm32-wasip2 --all-features --lib --locked --verbose
   Build:
     name: Build
-    needs: [BuildJob, MSRV]
+    needs:
+      - BuildJob
+      - MSRV
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -122,17 +130,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo fmt --all --check --verbose
   Clippy:
     name: Check Rust code with Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo install-tools
-      - run: cargo clippy --target wasm32-wasip2 --all-features --all-targets --verbose -- --deny warnings
-      - run: cargo clippy --target wasm32-wasip2 --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
+      - run: cargo clippy --all-features --all-targets --verbose -- --deny warnings
+      - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
+        if: failure()
+  WasmClippy:
+    name: Check Rust code with Clippy for wasm32-wasip2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      - run: cargo install-tools
+      # `--lib`: the component is what ships for wasm32-wasip2; tests and
+      # their dependencies are native-only (see `MSRV`).
+      - run: cargo clippy --target wasm32-wasip2 --all-features --lib --verbose -- --deny warnings
+      - run: cargo clippy --target wasm32-wasip2 --all-features --lib --quiet --message-format=json | cargo-action-fmt
         if: failure()
   Docs:
     name: Check rustdoc
@@ -144,21 +164,63 @@ jobs:
       RUSTDOCFLAGS: --deny warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo doc --workspace --all-features --no-deps --verbose
+      - run: cargo doc --workspace --target wasm32-wasip2 --all-features --no-deps --verbose
+  DocLinks:
+    name: Check markdown links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `--offline` checks only links inside the repo (files and, with
+      # `--include-fragments`, heading anchors), so a flaky external
+      # site can't fail CI. Quoted globs are expanded by lychee.
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --offline --no-progress --include-fragments
+            README.md CONTRIBUTING.md 'crates/*/README.md'
+  DocClaims:
+    name: Check docs for stale claims
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Fails on any phrase from `.github/stale-doc-phrases.txt` in the
+      # repo docs.
+      - name: Grep docs for stale phrases
+        run: |
+          set -euo pipefail
+          patterns="$RUNNER_TEMP/stale-doc-phrases"
+          grep -vE '^[[:space:]]*(#|$)' .github/stale-doc-phrases.txt > "$patterns"
+          mapfile -d '' files < <(git ls-files -z -- \
+            README.md CONTRIBUTING.md 'crates/*/README.md')
+          status=0
+          matches=$(grep -HniF -f "$patterns" -- "${files[@]}") || status=$?
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+          if [ "$status" -eq 0 ]; then
+            while IFS=: read -r file line text; do
+              # `%` starts an escape in workflow commands.
+              echo "::error file=$file,line=$line::Stale doc claim (see .github/stale-doc-phrases.txt): ${text//%/%25}"
+            done <<<"$matches"
+            exit 1
+          fi
   TestsJob:
     name: Tests per crate
     needs: RustMeta
     strategy:
+      # Let every row finish and store its reports for `Coverage`.
+      fail-fast: false
       matrix:
         args: ${{ fromJSON(needs.RustMeta.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo install-tools
       - name: Run tests
-        run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --no-fail-fast --no-tests=pass --verbose
+        run: cargo llvm-cov nextest ${{ matrix.args }} --all-targets --locked --no-fail-fast --no-tests=pass --verbose
       - name: Prepare coverage report
         if: ${{ !cancelled() }}
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
@@ -233,7 +295,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo install-tools
       - name: Machete
         run: cargo machete
@@ -263,13 +325,18 @@ jobs:
   PublishJob:
     name: Test publishing per crate
     needs: RustMeta
+    # Every plugin is `publish = false` (plugins ship as `.wasm`
+    # components, and the git SDK dependency blocks crates.io anyway),
+    # and an empty matrix is a workflow error, so skip the job until a
+    # crate is publishable.
+    if: ${{ needs.RustMeta.outputs.publish != '[]' }}
     strategy:
       matrix:
         package: ${{ fromJSON(needs.RustMeta.outputs.publish) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - name: Dry run publish
         run: cargo publish --all-features --package ${{ matrix.package }} --dry-run --verbose
       - name: Create package
@@ -290,13 +357,17 @@ jobs:
         if: ${{ needs.RustMeta.outputs.publish != '[]' && (needs.PublishJob.result == 'failure' || needs.PublishJob.result == 'cancelled') }}
         run: exit 1
   AllChecks:
+    # The `main` ruleset requires this job by name.
     name: All checks
     needs:
       - RustMeta
       - Build
       - Format
       - Clippy
+      - WasmClippy
       - Docs
+      - DocLinks
+      - DocClaims
       - Tests
       - Deps
       - OsvScannerPR

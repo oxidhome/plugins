@@ -4,14 +4,45 @@ members = ["crates/template"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/svilgelm/oxidhome-plugins"
-authors = ["Sergey Vilgelm <sergey@vilgelm.com>"]
+repository = "https://github.com/oxidhome/plugins"
+authors = ["The OxidHome Contributors"]
+
+[workspace.lints.rust]
+# `unsafe` is denied by default, as in oxidhome/oxidhome. A block may opt
+# in with `#[allow(unsafe_code)]` and a `// SAFETY:` comment; see
+# CONTRIBUTING.md.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+# Fails any build or clippy run that selects a crate with an unused
+# `[dependencies]` entry. Complements cargo-machete, which also covers
+# `[dev-dependencies]`.
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+
+# Every version lives here; members only write `<dep>.workspace = true`.
+[workspace.dependencies]
+# The OxidHome SDK and manifest crates are unpublished through 0.x, so
+# plugins take them from git, pinned to one oxidhome/oxidhome commit.
+# Both entries must point at the same `rev`: the manifest validator the
+# template tests against has to match the SDK (and WIT contract) it
+# builds against. To bump, set both `rev`s to the new commit, run
+# `cargo update -p oxidhome-sdk -p oxidhome-manifest`, and fix whatever
+# the new contract breaks; CONTRIBUTING.md has the full steps.
+#
+# `wit-bindgen` is not a dependency here: the SDK brings it in through
+# `oxidhome-wit`, which pins it exactly, so plugins always compile
+# against the bindgen version the host was tested with.
+oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "bcbdb926622b757d734952e53d8c70b66550c0a3" }
+oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "bcbdb926622b757d734952e53d8c70b66550c0a3" }
+# Test-only: parses `manifest.toml` the way the host does. Same version
+# as oxidhome/oxidhome so the lockfile keeps one copy.
+toml = { version = "1.1.2", default-features = false, features = ["parse", "serde", "std"] }
 
 [profile.release]
 lto = "thin"
