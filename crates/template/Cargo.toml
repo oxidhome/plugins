@@ -6,14 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Template plugin for OxidHome — copy and rename to start a new plugin."
+description = "Template plugin for OxidHome: copy and rename to start a new plugin."
+# Plugins ship as `.wasm` components next to their `manifest.toml`, not
+# as crates, and a crate with a git dependency can't go to crates.io.
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.63"
+oxidhome-sdk.workspace = true
+
+[dev-dependencies]
+oxidhome-manifest.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

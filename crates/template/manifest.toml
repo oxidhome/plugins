@@ -1,0 +1,29 @@
+manifest_version = 1
+
+[plugin]
+id = "oxidhome.template"
+name = "Template"
+version = "0.1.0"
+authors = ["The OxidHome Contributors"]
+description = "Starting point for a new OxidHome plugin: one software switch."
+source = "https://github.com/oxidhome/plugins/tree/main/crates/template"
+license = "MIT OR Apache-2.0"
+keywords = ["template", "switch"]
+world = "plugin"
+# The `oxidhome:plugin` contract version the pinned SDK implements.
+sdk_version = "0.1.0"
+
+[runtime]
+# Relative to the install directory, which holds this manifest and the
+# built component side by side; see README.md.
+wasm = "oxidhome_template_plugin.wasm"
+singleton = false
+
+[capabilities]
+# Lets the host's call-site gate allow `register-device` for a switch.
+declares_devices = ["switch"]
+
+[config.default_state]
+type = "bool"
+default = false
+description = "State the switch reports when the plugin starts."
