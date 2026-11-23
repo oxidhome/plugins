@@ -1147,3 +1147,32 @@ fn refused_camera_children_are_registered_on_a_later_probe() {
         "retried on the next probe"
     );
 }
+
+#[test]
+fn partial_bulb_reply_keeps_color_and_ptz_range_is_checked() {
+    let mut k = discovered(&[], vec![(BULB, bulb())]);
+    let lamp = id(&k, "BULB1");
+    let n = k.host.events_for(&lamp, cap::COLOR_LIGHT).len();
+    assert!(n > 0);
+    k.net.iot.get_mut(&BULB).unwrap().sysinfo["light_state"] = json!({ "on_off": 0 });
+    k.net.advance(60_000);
+    k.tick();
+    assert_eq!(
+        k.host.events_for(&lamp, cap::COLOR_LIGHT).len(),
+        n,
+        "no invented color"
+    );
+    let mv = vec![
+        kv("direction", Value::StringVal("left".into())),
+        kv("magnitude", Value::FloatVal(2.0)),
+    ];
+    let mut cam = FakeCam::basic();
+    cam.ptz = true;
+    let mut c = with_camera(&creds(), cam);
+    let cam_id = id(&c, "CAM1");
+    let r = c.execute_command(&cam_id, &cmd("m", &Ext::PanTilt.key(), "move", mv));
+    assert!(
+        matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
+        "{r:?}"
+    );
+}

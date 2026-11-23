@@ -685,7 +685,14 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// `ok-with-state` into the device snapshot but only `publish-event`
     /// notifies subscribers, so automations see the change through this.
     fn publish_confirmed(&mut self, device_id: &str, capability: &str, fields: &[KeyValue]) {
+        let key = (device_id.to_string(), capability.to_string());
+        let digest = format!("{fields:?}");
         self.publish_to(device_id, capability, fields.to_vec());
+        if self.published.get(&key) != Some(&digest) {
+            // Refused: the host snapshot already holds the new state, so
+            // the cache must not suppress the next observation.
+            self.published.remove(&key);
+        }
     }
 
     // ── Smart-home state ──────────────────────────────────────────────
@@ -694,7 +701,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let Some(p) = self.devices.get_mut(kasa_id) else {
             return;
         };
-        p.observed = true;
+        // A strip's outlet states are only known from a reply that lists them.
+        if p.class != KasaClass::Strip || !s.children.is_empty() {
+            p.observed = true;
+        }
         let mut reregister = false;
         if s.led_off.is_some() && !p.features.led {
             p.features.led = true;
@@ -709,8 +719,15 @@ impl<H: Host, N: Net> Kasa<H, N> {
         // its outlets.
         if p.class == KasaClass::Strip && !s.children.is_empty() {
             let children = bounded_children(&s.children);
-            let ids: Vec<&str> = p.children.iter().map(|c| c.id.as_str()).collect();
-            let new_ids: Vec<&str> = children.iter().map(|c| c.id.as_str()).collect();
+            let ids: Vec<(&str, &str)> = p
+                .children
+                .iter()
+                .map(|c| (c.id.as_str(), c.alias.as_str()))
+                .collect();
+            let new_ids: Vec<(&str, &str)> = children
+                .iter()
+                .map(|c| (c.id.as_str(), c.alias.as_str()))
+                .collect();
             if ids != new_ids {
                 reregister = true;
             }
@@ -763,19 +780,28 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
     }
 
-    fn apply_light(&mut self, kasa_id: &str, role: &Role, ls: iot::LightState) {
+    fn apply_light(&mut self, kasa_id: &str, role: &Role, mut ls: iot::LightState) {
         let (color, temp) = match self.devices.get_mut(kasa_id) {
             Some(p) => {
+                // A reply can carry only `on_off`; keep what was known
+                // instead of publishing invented color values.
+                if let Some(prev) = p.light {
+                    ls.brightness = ls.brightness.or(prev.brightness);
+                    ls.hue = ls.hue.or(prev.hue);
+                    ls.saturation = ls.saturation.or(prev.saturation);
+                    ls.color_temp = ls.color_temp.or(prev.color_temp);
+                }
                 p.light = Some(ls);
                 (p.color, p.temp)
             }
             None => return,
         };
+        let known_color = ls.hue.is_some() || ls.saturation.is_some() || ls.color_temp.is_some();
         self.publish(kasa_id, role, cap::SWITCH, switch_fields(ls.on));
         if let Some(b) = ls.brightness {
             self.publish(kasa_id, role, cap::DIMMER, dimmer_fields(b));
         }
-        if color || temp {
+        if (color || temp) && known_color {
             self.publish(
                 kasa_id,
                 role,
@@ -837,7 +863,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
         self.apply_sysinfo(kasa_id, &s);
         if emeter {
-            self.poll_energy(kasa_id, addr, due_history, now);
+            // History is 2–3 more exchanges; when the tick is out of
+            // budget it stays due and runs on a later poll.
+            let with_history = due_history && !self.over_budget();
+            self.poll_energy(kasa_id, addr, with_history, now);
         }
     }
 
@@ -1438,9 +1467,12 @@ impl<H: Host, N: Net> Kasa<H, N> {
                         invalid("pan-tilt::move requires `direction`: left|right|top|bottom")
                     })?;
                 if (args::has(a, "speed") && args::int(a, "speed").is_none())
-                    || (args::has(a, "magnitude") && args::number(a, "magnitude").is_none())
+                    || (args::has(a, "magnitude")
+                        && !args::number(a, "magnitude").is_some_and(|m| (-1.0..=1.0).contains(&m)))
                 {
-                    return Err(invalid("`speed` must be an integer, `magnitude` a number"));
+                    return Err(invalid(
+                        "`speed` must be an integer, `magnitude` a number in [-1, 1]",
+                    ));
                 }
                 let speed = match (args::int(a, "speed"), args::number(a, "magnitude")) {
                     (Some(s), _) if (1..=10).contains(&s) => u8::try_from(s).unwrap_or(1),

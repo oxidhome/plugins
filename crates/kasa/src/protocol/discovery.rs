@@ -333,6 +333,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_fields_fall_back() {
+        let v = json!({"system":{"get_sysinfo":{"alias":"A","model":"KC100","mic_mac":"",
+            "mac":"11:22","type":"","mic_type":"IOT.IPCAMERA"}}});
+        let d = parse_reply(IP, &datagram(&v)).unwrap();
+        assert_eq!(d.id, "11:22");
+        assert_eq!(d.class, Some(KasaClass::Camera));
+    }
+
+    #[test]
     fn walks_arrays_and_skips_empty_ids() {
         let v = json!({"result":[{"model":"KP115","alias":"A","deviceId":"","mac":"AA:BB",
             "type":"IOT.SMARTPLUGSWITCH"}]});

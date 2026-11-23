@@ -275,6 +275,17 @@ of them by changing the WIT.
   `emeter` calls.
 - Move to the `streaming-plugin` world once the SDK and host support it (gap 0).
 - Integration tests against the OxidHome test host, once it links `streaming-plugin`.
+- Review round 3 follow-ups:
+  - bound the camera command queue by the host's pending-command limit (64, 5 min expiry)
+    and check a job's age before sending it;
+  - schedule motion reads fairly with ordinary polls, and settle expired motion holds
+    outside the network budget;
+  - escape `/` in device ids so a physical id can't collide with a generated child id;
+  - promote a device to `Strip` when a later reply lists children;
+  - keep a stored device whose re-registration the host refuses at restore in the index
+    until it is explicitly retired;
+  - track bulb brightness separately from power, so a confirmed `dimmer::set` before
+    the first read is kept.
 
 ## Development
 

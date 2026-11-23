@@ -519,13 +519,9 @@ impl SysInfo {
                 .or_else(|| get_str(o, "hwId"))
                 .or_else(|| get_str(o, "hw_id"))
                 .map(str::to_string),
-            mac: get_str(o, "mic_mac")
-                .or_else(|| get_str(o, "mac"))
-                .map(str::to_string),
-            kind: get_str(o, "type")
-                .or_else(|| get_str(o, "mic_type"))
-                .or_else(|| get_str(o, "deviceType"))
-                .map(str::to_string),
+            // First nonempty value, as the TS discovery handler does.
+            mac: first_nonempty(o, &["mic_mac", "mac"]),
+            kind: first_nonempty(o, &["type", "mic_type", "deviceType"]),
             sw_ver: get_str(o, "sw_ver").map(str::to_string),
             hw_ver: get_str(o, "hw_ver").map(str::to_string),
             dev_name: get_str(o, "dev_name").map(str::to_string),
@@ -783,6 +779,13 @@ pub fn energy_history(today: DeviceDate, stats: &[EnergyStat]) -> EnergyHistory 
         days,
         months,
     }
+}
+
+fn first_nonempty(o: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|k| get_str(o, k))
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
