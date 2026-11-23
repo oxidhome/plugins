@@ -283,8 +283,18 @@ impl<H: Host, N: Net> Kasa<H, N> {
             // A retried read must not undo what was learned meanwhile.
             if !self.devices.contains_key(&d.id) {
                 self.adopt(&d, false);
+                // A device found live during a storage outage may hold
+                // this address now.
+                let address = d.address.to_string();
+                let taken = self
+                    .devices
+                    .iter()
+                    .any(|(id, p)| id != &d.id && p.ident.address == address && !p.address_stale);
                 if let Some(p) = self.devices.get_mut(&d.id) {
-                    p.address_stale = stale;
+                    p.address_stale = stale || taken;
+                }
+                if taken && !stale {
+                    self.dirty = true;
                 }
             }
         }
@@ -605,15 +615,17 @@ impl<H: Host, N: Net> Kasa<H, N> {
         Physical {
             ident: Identity {
                 kasa_id: d.id.clone(),
-                name: s
-                    .alias
-                    .clone()
-                    .filter(|a| !a.is_empty())
-                    .unwrap_or_else(|| {
-                        format!("Kasa {}", s.model.as_deref().unwrap_or(class.as_str()))
-                    }),
-                model: s.model.clone(),
-                firmware: s.sw_ver.clone(),
+                name: s.alias.as_deref().filter(|a| !a.is_empty()).map_or_else(
+                    || {
+                        format!(
+                            "Kasa {}",
+                            clip(s.model.as_deref().unwrap_or(class.as_str()))
+                        )
+                    },
+                    |a| clip(a).to_string(),
+                ),
+                model: s.model.as_deref().map(|m| clip(m).to_string()),
+                firmware: s.sw_ver.as_deref().map(|f| clip(f).to_string()),
                 mac: s.mac.clone(),
                 address: d.address.to_string(),
                 class: Some(class),
@@ -905,8 +917,12 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 return;
             }
         };
+        let stored_mac = self.devices.get(kasa_id).and_then(|p| p.ident.mac.clone());
+        let same_mac = matches!((&stored_mac, s.mac.as_deref()), (Some(a), Some(b)) if norm_mac(a) == norm_mac(b));
         let other = if let Some(i) = s.device_id.as_deref().filter(|i| !i.is_empty()) {
-            (i != kasa_id).then(|| i.to_string())
+            // A device adopted by MAC (no deviceId in discovery) is still
+            // itself when its sysinfo adds one.
+            (i != kasa_id && !same_mac).then(|| i.to_string())
         } else {
             // No device id: devices adopted by MAC are checked by MAC.
             let stored = self.devices.get(kasa_id).and_then(|p| p.ident.mac.clone());
@@ -982,7 +998,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
         if let Some(r) = reading {
             self.publish(kasa_id, &Role::Power, cap::SENSOR, power_fields(r.power_w));
         }
-        self.publish(kasa_id, &role, &Ext::EnergyMeter.key(), fields.clone());
+        if !fields.is_empty() {
+            self.publish(kasa_id, &role, &Ext::EnergyMeter.key(), fields.clone());
+        }
         (reading.is_some(), fields)
     }
 
@@ -1061,7 +1079,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
         };
         let ptz = camera::parse_ptz_capability(&reply);
         // `None` when the read failed: keep the last good list.
-        let presets = if ptz.is_some() {
+        let presets = if ptz.is_some() && !self.over_budget() {
             self.linkie(kasa_id, &camera::get_presets())
                 .ok()
                 .and_then(|v| camera::parse_presets(&v))
@@ -1417,7 +1435,15 @@ impl<H: Host, N: Net> Kasa<H, N> {
         {
             let now = self.net.monotonic_ms();
             return match self.poll_energy(kasa_id, addr, true, now) {
-                (true, fields) => CommandResult::OkWithState(fields),
+                (true, fields) => {
+                    // The host projects this into the snapshot even when
+                    // the event was refused; keep the cache honest.
+                    let key = (device.to_string(), Ext::EnergyMeter.key());
+                    if self.published.get(&key) != Some(&format!("{fields:?}")) {
+                        self.published.remove(&key);
+                    }
+                    CommandResult::OkWithState(fields)
+                }
                 (false, _) => unavailable("energy meter did not answer"),
             };
         }
@@ -1694,7 +1720,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let req = camera::snapshot_request(&host, camera::STREAM_PORT, &stream_auth(&user, &pass));
         let resp = match self.net.https(&req, camera::SNAPSHOT_TIMEOUT_MS) {
             Ok(r) => r,
-            Err(e) => return cam_error_result(&CamError::Net(e)),
+            // A read: nothing changed on the camera, so a retry is safe.
+            Err(e) => return unavailable(e.message().to_string()),
         };
         let jpeg = match camera::parse_snapshot(resp) {
             Ok(j) => j,
@@ -2064,7 +2091,11 @@ fn bounded_children(children: &[ChildOutlet]) -> Vec<ChildOutlet> {
         .iter()
         .filter(|c| !c.id.is_empty() && c.id.len() <= MAX_ID_LEN)
         .take(MAX_OUTLETS)
-        .cloned()
+        .map(|c| ChildOutlet {
+            // Device-supplied text is bounded before it is kept.
+            alias: clip(&c.alias).to_string(),
+            ..c.clone()
+        })
         .collect()
 }
 
