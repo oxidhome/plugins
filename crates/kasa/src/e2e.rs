@@ -1,0 +1,918 @@
+//! End-to-end tests of [`Kasa`] over the fake host and network.
+
+use std::net::Ipv4Addr;
+
+use serde_json::json;
+
+use crate::fake::{FakeCam, FakeHost, FakeIot, FakeNet};
+use crate::kasa::{Kasa, STORAGE_KEY};
+use crate::mapping::{Ext, cap};
+use crate::platform::NetError;
+use oxidhome_sdk::bindings::oxidhome::plugin::devices::{Command, CommandResult};
+use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
+
+const PLUG: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 10);
+const BULB: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 11);
+const STRIP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 12);
+const DIMMER: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 13);
+const CAM: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 20);
+
+fn plug() -> FakeIot {
+    let mut d = FakeIot::new(json!({
+        "type": "IOT.SMARTPLUGSWITCH", "model": "KP115(US)", "alias": "Kettle",
+        "deviceId": "PLUG1", "mac": "AA:BB", "sw_ver": "1.0.1", "dev_name": "Smart Wi-Fi Plug",
+        "feature": "TIM:ENE", "relay_state": 0, "led_off": 0
+    }));
+    d.realtime = Some(
+        json!({ "voltage_mv": 120_000, "current_ma": 500, "power_mw": 60_000, "total_wh": 1_000 }),
+    );
+    d
+}
+
+fn bulb() -> FakeIot {
+    FakeIot::new(json!({
+        "type": "IOT.SMARTBULB", "model": "KL130(US)", "alias": "Lamp", "deviceId": "BULB1",
+        "is_color": 1, "is_variable_color_temp": 1, "is_dimmable": 1,
+        "light_state": { "on_off": 1, "brightness": 40, "hue": 0, "saturation": 0, "color_temp": 2700 }
+    }))
+}
+
+fn strip() -> FakeIot {
+    FakeIot::new(json!({
+        "type": "IOT.SMARTPLUGSWITCH", "model": "HS300(US)", "alias": "Desk", "deviceId": "STRIP",
+        "led_off": 1, "feature": "TIM:ENE",
+        "children": [ { "id": "00", "alias": "Monitor", "state": 1 }, { "id": "01", "alias": "", "state": 0 } ]
+    }))
+}
+
+fn dimmer() -> FakeIot {
+    FakeIot::new(json!({
+        "type": "IOT.SMARTPLUGSWITCH", "model": "HS220(US)", "alias": "Hall", "deviceId": "DIM1",
+        "dev_name": "Smart Wi-Fi Dimmer", "relay_state": 1, "brightness": 30, "led_off": 0
+    }))
+}
+
+fn camera_discovery() -> FakeIot {
+    // A camera answers the UDP probe; its TCP 9999 is not used.
+    FakeIot::new(json!({
+        "system": { "deviceId": "CAM1", "alias": "Yard", "model": "KC420WS(US)",
+            "mic_type": "IOT.IPCAMERA", "mic_mac": "CC:DD", "sw_ver": "2.3" }
+    }))
+}
+
+fn kv(k: &str, v: Value) -> KeyValue {
+    KeyValue {
+        key: k.into(),
+        value: v,
+    }
+}
+
+fn cmd(id: &str, capability: &str, action: &str, args: Vec<KeyValue>) -> Command {
+    Command {
+        id: id.into(),
+        capability: capability.into(),
+        action: action.into(),
+        args,
+    }
+}
+
+fn creds() -> Vec<(&'static str, Value)> {
+    vec![
+        ("camera_username", Value::StringVal("me@example.com".into())),
+        ("camera_password", Value::StringVal("hunter2".into())),
+        (
+            "discovery_targets",
+            Value::StringVal("192.168.1.0/24".into()),
+        ),
+    ]
+}
+
+/// A plugin with the given devices, after one full discovery.
+fn discovered(cfg: &[(&str, Value)], devices: Vec<(Ipv4Addr, FakeIot)>) -> Kasa<FakeHost, FakeNet> {
+    let mut net = FakeNet {
+        now_ms: 1_000,
+        unix_ms: 1_700_000_000_000,
+        ..FakeNet::default()
+    };
+    net.iot.extend(devices);
+    let mut k = Kasa::new(FakeHost::with_config(cfg), net);
+    k.init();
+    for _ in 0..8 {
+        k.tick();
+        k.net.advance(500);
+    }
+    k
+}
+
+fn id(k: &Kasa<FakeHost, FakeNet>, local: &str) -> String {
+    k.device_id_of(local)
+        .unwrap_or_else(|| panic!("{local} not registered: {:?}", k.host.devices))
+}
+
+fn bool_field(r: &CommandResult, key: &str) -> Option<bool> {
+    match r {
+        CommandResult::OkWithState(f) => f.iter().find_map(|kv| match &kv.value {
+            Value::BoolVal(b) if kv.key == key => Some(*b),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+#[test]
+fn discovery_registers_every_family_with_its_capabilities() {
+    let k = discovered(
+        &[],
+        vec![
+            (PLUG, plug()),
+            (BULB, bulb()),
+            (STRIP, strip()),
+            (DIMMER, dimmer()),
+        ],
+    );
+    let caps = |local: &str| -> Vec<String> {
+        k.host
+            .device(local)
+            .unwrap()
+            .1
+            .capabilities
+            .iter()
+            .map(|c| {
+                let d = format!("{c:?}");
+                let d = d.strip_prefix("CapabilitySpec::").unwrap_or(&d);
+                d.split('(').next().unwrap().to_string()
+            })
+            .collect()
+    };
+    assert_eq!(caps("PLUG1"), ["Switch", "Extension", "Extension"]);
+    assert_eq!(caps("PLUG1/power"), ["Sensor"]);
+    assert_eq!(caps("BULB1"), ["Switch", "Dimmer", "ColorLight"]);
+    assert_eq!(caps("DIM1"), ["Switch", "Dimmer", "Extension"]);
+    assert_eq!(caps("STRIP"), ["Extension"]);
+    assert_eq!(caps("STRIP/outlet-00"), ["Switch"]);
+    assert_eq!(k.host.device("STRIP/outlet-00").unwrap().1.name, "Monitor");
+    assert_eq!(k.host.device("STRIP/outlet-01").unwrap().1.name, "Desk");
+    assert_eq!(k.host.devices.len(), 7);
+    // Broadcast went out once; no sweep configured.
+    assert!(k.net.udp_sent.iter().all(|a| a.ip().is_broadcast()));
+    assert!(!k.net.udp_open, "socket closed after the window");
+
+    // State from the discovery reply was published.
+    let plug = id(&k, "PLUG1");
+    let sw = k.host.events_for(&plug, cap::SWITCH);
+    assert_eq!(sw.len(), 1);
+    assert!(matches!(sw[0].get("state"), Some(Value::BoolVal(false))));
+    let led = k.host.events_for(&plug, &Ext::StatusLed.key());
+    assert!(matches!(led[0].get("on"), Some(Value::BoolVal(true))));
+    let monitor = id(&k, "STRIP/outlet-00");
+    assert!(matches!(
+        k.host.events_for(&monitor, cap::SWITCH)[0].get("state"),
+        Some(Value::BoolVal(true))
+    ));
+    let bulb = id(&k, "BULB1");
+    let color = k.host.events_for(&bulb, cap::COLOR_LIGHT);
+    assert!(matches!(
+        color[0].get("color_temp_kelvin"),
+        Some(Value::IntVal(2700))
+    ));
+    let dim = id(&k, "DIM1");
+    assert!(matches!(
+        k.host.events_for(&dim, cap::DIMMER)[0].get("level"),
+        Some(Value::FloatVal(l)) if (l - 0.3).abs() < 1e-9
+    ));
+}
+
+#[test]
+fn sweep_is_paced_and_finds_unicast_only_devices() {
+    let cfg = [
+        ("discovery_broadcast", Value::BoolVal(false)),
+        (
+            "discovery_targets",
+            Value::StringVal("192.168.1.0/24".into()),
+        ),
+    ];
+    let k = discovered(&cfg, vec![(PLUG, plug())]);
+    assert_eq!(k.net.udp_sent.len(), 254);
+    assert!(k.net.udp_sent.iter().all(|a| !a.ip().is_broadcast()));
+    assert_eq!(
+        k.net.slept_ms,
+        3 * (254 - 4),
+        "3 ms between probes within a tick"
+    );
+    assert!(k.device_id_of("PLUG1").is_some());
+}
+
+#[test]
+fn devices_persist_and_come_back_without_discovery() {
+    let k = discovered(&[], vec![(PLUG, plug()), (STRIP, strip())]);
+    let stored = k.host.storage.get(STORAGE_KEY).cloned().unwrap();
+    let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
+    host.storage.insert(STORAGE_KEY.into(), stored);
+    let mut net = FakeNet::default();
+    net.iot.insert(PLUG, plug());
+    let mut k2 = Kasa::new(host, net);
+    k2.init();
+    let mut locals: Vec<String> = k2
+        .host
+        .devices
+        .iter()
+        .map(|(_, d)| d.local_id.clone())
+        .collect();
+    locals.sort();
+    assert_eq!(
+        locals,
+        [
+            "PLUG1",
+            "PLUG1/power",
+            "STRIP",
+            "STRIP/outlet-00",
+            "STRIP/outlet-01"
+        ]
+    );
+    let plug = k2.host.device("PLUG1").unwrap();
+    assert_eq!(plug.1.name, "Kettle");
+    assert_eq!(plug.1.capabilities.len(), 3);
+    k2.tick();
+    assert!(k2.net.udp_sent.is_empty(), "discovery disabled");
+}
+
+#[test]
+fn polling_publishes_changes_only_and_reads_energy() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    let plug = id(&k, "PLUG1");
+    let power = id(&k, "PLUG1/power");
+    k.net.advance(30_000);
+    k.tick();
+    let energy = k.host.events_for(&plug, &Ext::EnergyMeter.key());
+    assert_eq!(energy.len(), 1);
+    assert!(
+        matches!(energy[0].get("power_w"), Some(Value::FloatVal(p)) if (p - 60.0).abs() < 1e-9)
+    );
+    assert!(
+        matches!(energy[0].get("today_wh"), Some(Value::FloatVal(w)) if (w - 120.0).abs() < 1e-9)
+    );
+    assert!(
+        matches!(energy[0].get("month_wh"), Some(Value::FloatVal(w)) if (w - 200.0).abs() < 1e-9)
+    );
+    assert_eq!(k.host.events_for(&power, cap::SENSOR).len(), 1);
+    // Nothing changed: the next poll publishes nothing new.
+    let before = k.host.events.len();
+    k.net.advance(30_000);
+    k.tick();
+    assert_eq!(k.host.events.len(), before);
+    // The relay flips on the device (the app): the poll publishes it.
+    k.net.iot.get_mut(&PLUG).unwrap().sysinfo["relay_state"] = json!(1);
+    k.net.advance(30_000);
+    k.tick();
+    let sw = k.host.events_for(&plug, cap::SWITCH);
+    assert!(matches!(
+        sw.last().unwrap().get("state"),
+        Some(Value::BoolVal(true))
+    ));
+}
+
+#[test]
+fn unreachable_device_logs_once_and_recovers() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    k.net.iot.get_mut(&PLUG).unwrap().fail = Some(NetError::Sent("timeout".into()));
+    for _ in 0..3 {
+        k.net.advance(30_000);
+        k.tick();
+    }
+    let warns = k
+        .host
+        .logs
+        .iter()
+        .filter(|(_, m)| m.contains("state poll failed"))
+        .count();
+    assert_eq!(warns, 1);
+    k.net.iot.get_mut(&PLUG).unwrap().fail = None;
+    k.net.advance(30_000);
+    k.tick();
+    assert!(
+        k.host
+            .logs
+            .iter()
+            .any(|(_, m)| m.contains("reachable again"))
+    );
+}
+
+#[test]
+fn relay_commands_have_h5_outcomes() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    let plug = id(&k, "PLUG1");
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "c1",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(true))],
+        ),
+    );
+    assert_eq!(bool_field(&r, "state"), Some(true));
+    assert_eq!(k.net.iot[&PLUG].sysinfo["relay_state"], json!(1));
+    // The poll that follows doesn't re-publish what the result carried.
+    let n = k.host.events_for(&plug, cap::SWITCH).len();
+    k.net.advance(30_000);
+    k.tick();
+    assert_eq!(k.host.events_for(&plug, cap::SWITCH).len(), n);
+
+    let r = k.execute_command(&plug, &cmd("c2", cap::SWITCH, "toggle", vec![]));
+    assert_eq!(bool_field(&r, "state"), Some(false));
+
+    // Bad arguments → invalid-argument, nothing sent.
+    let sent = k.net.tcp_count;
+    let r = k.execute_command(&plug, &cmd("c3", cap::SWITCH, "set", vec![]));
+    assert!(matches!(r, CommandResult::Err(Error::InvalidArgument(_))));
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "c4",
+            cap::DIMMER,
+            "set",
+            vec![kv("level", Value::FloatVal(0.5))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Err(Error::InvalidArgument(_))));
+    assert_eq!(k.net.tcp_count, sent);
+
+    // Connect failure → err (nothing reached the device).
+    k.net.iot.get_mut(&PLUG).unwrap().fail = Some(NetError::NotSent("refused".into()));
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "c5",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(true))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Err(Error::Unavailable(_))));
+    // Timeout after sending → unknown.
+    k.net.iot.get_mut(&PLUG).unwrap().fail = Some(NetError::Sent("timeout".into()));
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "c6",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(true))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Unknown(_)));
+    // Device refuses → err.
+    k.net.iot.get_mut(&PLUG).unwrap().fail = None;
+    k.net.iot.get_mut(&PLUG).unwrap().err_code = -1;
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "c7",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(true))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Err(Error::Unavailable(m)) if m.contains("-1")));
+
+    let r = k.execute_command("nope", &cmd("c8", cap::SWITCH, "toggle", vec![]));
+    assert!(matches!(r, CommandResult::Err(Error::NotFound(_))));
+    let power = id(&k, "PLUG1/power");
+    let r = k.execute_command(&power, &cmd("c9", cap::SWITCH, "toggle", vec![]));
+    assert!(matches!(r, CommandResult::Err(Error::InvalidArgument(_))));
+}
+
+#[test]
+fn led_energy_and_outlet_commands() {
+    let mut k = discovered(&[], vec![(PLUG, plug()), (STRIP, strip())]);
+    let plug = id(&k, "PLUG1");
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "l",
+            &Ext::StatusLed.key(),
+            "set",
+            vec![kv("on", Value::BoolVal(false))],
+        ),
+    );
+    assert_eq!(bool_field(&r, "on"), Some(false));
+    assert_eq!(k.net.iot[&PLUG].sysinfo["led_off"], json!(1));
+
+    let r = k.execute_command(&plug, &cmd("e", &Ext::EnergyMeter.key(), "refresh", vec![]));
+    assert!(matches!(&r, CommandResult::OkWithState(f) if f.iter().any(|kv| kv.key == "history")));
+
+    let outlet = id(&k, "STRIP/outlet-01");
+    let r = k.execute_command(&outlet, &cmd("o", cap::SWITCH, "toggle", vec![]));
+    assert_eq!(bool_field(&r, "state"), Some(true));
+    let last = k.net.iot[&STRIP].requests.last().unwrap().clone();
+    assert_eq!(
+        last["context"]["child_ids"],
+        json!(["01"]),
+        "reported id sent verbatim"
+    );
+    assert_eq!(k.net.iot[&STRIP].sysinfo["children"][1]["state"], json!(1));
+    assert_eq!(
+        k.net.iot[&STRIP].sysinfo["children"][0]["state"],
+        json!(1),
+        "other outlet untouched"
+    );
+}
+
+#[test]
+fn bulb_and_dimmer_commands() {
+    let mut k = discovered(&[], vec![(BULB, bulb()), (DIMMER, dimmer())]);
+    let bulb = id(&k, "BULB1");
+    let r = k.execute_command(
+        &bulb,
+        &cmd(
+            "b1",
+            cap::DIMMER,
+            "set",
+            vec![kv("level", Value::FloatVal(0.75))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::OkWithState(_)));
+    assert_eq!(
+        k.net.iot[&BULB].sysinfo["light_state"]["brightness"],
+        json!(75)
+    );
+
+    let hsv = vec![
+        kv("hue", Value::FloatVal(0.5)),
+        kv("saturation", Value::FloatVal(1.0)),
+    ];
+    let r = k.execute_command(&bulb, &cmd("b2", cap::COLOR_LIGHT, "set", hsv));
+    assert!(matches!(r, CommandResult::OkWithState(_)));
+    let ls = &k.net.iot[&BULB].sysinfo["light_state"];
+    assert_eq!(
+        (
+            ls["hue"].clone(),
+            ls["saturation"].clone(),
+            ls["color_temp"].clone()
+        ),
+        (json!(180), json!(100), json!(0))
+    );
+
+    let r = k.execute_command(
+        &bulb,
+        &cmd(
+            "b3",
+            cap::COLOR_LIGHT,
+            "set",
+            vec![kv("color_temp_kelvin", Value::IntVal(4000))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::OkWithState(_)));
+    assert_eq!(
+        k.net.iot[&BULB].sysinfo["light_state"]["color_temp"],
+        json!(4000)
+    );
+    let r = k.execute_command(
+        &bulb,
+        &cmd(
+            "b4",
+            cap::COLOR_LIGHT,
+            "set",
+            vec![kv("color_temp_kelvin", Value::IntVal(9000))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Err(Error::InvalidArgument(_))));
+
+    let r = k.execute_command(
+        &bulb,
+        &cmd(
+            "b5",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(false))],
+        ),
+    );
+    assert_eq!(bool_field(&r, "state"), Some(false));
+    assert_eq!(k.net.iot[&BULB].sysinfo["light_state"]["on_off"], json!(0));
+
+    let dim = id(&k, "DIM1");
+    let r = k.execute_command(
+        &dim,
+        &cmd(
+            "d1",
+            cap::DIMMER,
+            "set",
+            vec![kv("level", Value::IntVal(1))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::OkWithState(_)));
+    assert_eq!(k.net.iot[&DIMMER].sysinfo["brightness"], json!(100));
+    let r = k.execute_command(
+        &dim,
+        &cmd(
+            "d2",
+            cap::DIMMER,
+            "set",
+            vec![kv("level", Value::FloatVal(0.0))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Err(Error::InvalidArgument(_))));
+}
+
+fn with_camera(cfg: &[(&str, Value)], cam: FakeCam) -> Kasa<FakeHost, FakeNet> {
+    let mut k = discovered(cfg, vec![(CAM, camera_discovery())]);
+    k.net.cams.insert(CAM, cam);
+    // The first camera poll was due on adoption; run it now that the
+    // camera answers.
+    k.net.advance(30_000);
+    k.tick();
+    k
+}
+
+#[test]
+fn camera_probe_registers_children_and_publishes_state() {
+    let mut cam = FakeCam::basic();
+    cam.ptz = true;
+    let k = with_camera(&creds(), cam);
+    let main = k.host.device("CAM1").unwrap().1.clone();
+    let names: Vec<String> = main
+        .capabilities
+        .iter()
+        .map(|c| format!("{c:?}").replace("CapabilitySpec::", ""))
+        .collect();
+    assert!(
+        names[0].starts_with("VideoStream") && names[1].starts_with("AudioStream"),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|n| n.contains("pan-tilt")), "{names:?}");
+    assert!(names.iter().any(|n| n.contains("status-led")), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n.contains("motion")),
+        "motion is opt-in"
+    );
+    assert!(k.device_id_of("CAM1/siren").is_some());
+    assert!(k.device_id_of("CAM1/privacy").is_some());
+    assert!(
+        k.device_id_of("CAM1/spotlight").is_none(),
+        "no dayNight module"
+    );
+    let privacy = id(&k, "CAM1/privacy");
+    assert!(matches!(
+        k.host.events_for(&privacy, cap::SWITCH)[0].get("state"),
+        Some(Value::BoolVal(false))
+    ));
+    let cam_id = id(&k, "CAM1");
+    let pt = k.host.events_for(&cam_id, &Ext::PanTilt.key());
+    assert!(matches!(pt[0].get("presets"), Some(Value::JsonVal(s)) if s.contains("Door")));
+    // Control auth is md5 hex of the password.
+    assert!(k.net.cams[&CAM].auth_seen[0].starts_with("Basic "));
+}
+
+#[test]
+fn camera_commands_are_accepted_then_completed() {
+    let mut k = with_camera(&creds(), FakeCam::basic());
+    let siren = id(&k, "CAM1/siren");
+    let r = k.execute_command(
+        &siren,
+        &cmd(
+            "s1",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(true))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Accepted));
+    k.tick();
+    let (cid, res) = k.host.completed.last().unwrap();
+    assert_eq!(cid, "s1");
+    assert_eq!(bool_field(res, "state"), Some(true));
+    assert_eq!(
+        k.net.cams[&CAM].values["smartlife.cam.ipcamera.siren"],
+        "on"
+    );
+
+    // Privacy on = camera off.
+    let privacy = id(&k, "CAM1/privacy");
+    k.execute_command(&privacy, &cmd("p1", cap::SWITCH, "toggle", vec![]));
+    k.tick();
+    assert_eq!(
+        k.net.cams[&CAM].values["smartlife.cam.ipcamera.switch"],
+        "off"
+    );
+    assert_eq!(
+        bool_field(&k.host.completed.last().unwrap().1, "state"),
+        Some(true)
+    );
+
+    let cam_id = id(&k, "CAM1");
+    k.execute_command(
+        &cam_id,
+        &cmd("r1", &Ext::CameraControl.key(), "reboot", vec![]),
+    );
+    k.execute_command(
+        &cam_id,
+        &cmd("snap", &Ext::CameraControl.key(), "snapshot", vec![]),
+    );
+    k.tick();
+    let done: Vec<&(String, CommandResult)> = k.host.completed.iter().rev().take(2).collect();
+    assert!(matches!(done[1], (id, CommandResult::Ok) if id == "r1"));
+    assert!(matches!(&done[0].1, CommandResult::OkWithState(_)));
+    assert_eq!(k.host.blobs[0].0, "snapshot-kasa-cam1.jpg");
+    assert_eq!(k.host.blobs[0].2, "image/jpeg");
+
+    // Device-side refusal → err; HTTP 401 → permission-denied; timeout → unknown.
+    k.net.cams.get_mut(&CAM).unwrap().write_err = Some(-40709);
+    k.execute_command(
+        &siren,
+        &cmd(
+            "s2",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(false))],
+        ),
+    );
+    k.tick();
+    assert!(matches!(
+        k.host.completed.last().unwrap().1,
+        CommandResult::Err(Error::Unavailable(_))
+    ));
+    k.net.cams.get_mut(&CAM).unwrap().status = Some(401);
+    k.execute_command(
+        &siren,
+        &cmd(
+            "s3",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(false))],
+        ),
+    );
+    k.tick();
+    assert!(matches!(
+        k.host.completed.last().unwrap().1,
+        CommandResult::Err(Error::PermissionDenied(_))
+    ));
+    k.net.cams.get_mut(&CAM).unwrap().fail = Some(NetError::Sent("timeout".into()));
+    k.execute_command(
+        &siren,
+        &cmd(
+            "s4",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(false))],
+        ),
+    );
+    k.tick();
+    assert!(matches!(
+        k.host.completed.last().unwrap().1,
+        CommandResult::Unknown(_)
+    ));
+
+    // Validation happens before acceptance.
+    let r = k.execute_command(&cam_id, &cmd("m", &Ext::PanTilt.key(), "move", vec![]));
+    assert!(
+        matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
+        "no PTZ on this camera"
+    );
+}
+
+#[test]
+fn camera_without_credentials_is_registered_but_unavailable() {
+    let k0 = discovered(&[], vec![(CAM, camera_discovery())]);
+    let mut k = k0;
+    k.net.cams.insert(CAM, FakeCam::basic());
+    k.net.advance(30_000);
+    k.tick();
+    assert!(
+        k.net.cams[&CAM].calls.is_empty(),
+        "no calls without credentials"
+    );
+    let cam_id = id(&k, "CAM1");
+    let r = k.execute_command(
+        &cam_id,
+        &cmd("r", &Ext::CameraControl.key(), "reboot", vec![]),
+    );
+    assert!(
+        matches!(r, CommandResult::Err(Error::Unavailable(m)) if m.contains("camera_password"))
+    );
+}
+
+#[test]
+fn ptz_commands() {
+    let mut cam = FakeCam::basic();
+    cam.ptz = true;
+    let mut k = with_camera(&creds(), cam);
+    let cam_id = id(&k, "CAM1");
+    let mv = vec![
+        kv("direction", Value::StringVal("up".into())),
+        kv("magnitude", Value::FloatVal(0.45)),
+    ];
+    assert!(matches!(
+        k.execute_command(&cam_id, &cmd("m1", &Ext::PanTilt.key(), "move", mv)),
+        CommandResult::Accepted
+    ));
+    let go = vec![kv("index", Value::IntVal(1))];
+    k.execute_command(&cam_id, &cmd("m2", &Ext::PanTilt.key(), "goto-preset", go));
+    k.tick();
+    let calls = &k.net.cams[&CAM].calls;
+    let mv = calls.iter().find(|c| c.1 == "set_move").unwrap();
+    assert_eq!(mv.2, json!({ "direction": "top", "speed": 5 }));
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.1 == "set_run_to_preset" && c.2 == json!({ "index": 1 }))
+    );
+    k.net.cams.get_mut(&CAM).unwrap().write_err = Some(-41203);
+    let mv = vec![kv("direction", Value::StringVal("left".into()))];
+    k.execute_command(&cam_id, &cmd("m3", &Ext::PanTilt.key(), "move", mv));
+    k.tick();
+    assert!(matches!(
+        k.host.completed.last().unwrap().1,
+        CommandResult::Err(Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn motion_polling_holds_and_pauses_in_privacy() {
+    let mut cfg = creds();
+    cfg.push(("camera_motion", Value::BoolVal(true)));
+    let mut k = with_camera(&cfg, FakeCam::basic());
+    let cam_id = id(&k, "CAM1");
+    k.net.cams.get_mut(&CAM).unwrap().moving = true;
+    k.net.advance(1_000);
+    k.tick();
+    let motion = |k: &Kasa<FakeHost, FakeNet>| -> Vec<Option<bool>> {
+        k.host
+            .events_for(&cam_id, &Ext::Motion.key())
+            .iter()
+            .map(|e| match e.get("detected") {
+                Some(Value::BoolVal(b)) => Some(*b),
+                _ => None,
+            })
+            .collect()
+    };
+    // The first successful poll publishes the idle state, then motion.
+    assert_eq!(motion(&k), [Some(false), Some(true)]);
+    k.net.cams.get_mut(&CAM).unwrap().moving = false;
+    for _ in 0..5 {
+        k.net.advance(1_000);
+        k.tick();
+    }
+    assert_eq!(motion(&k).len(), 2, "held while within 10 s");
+    for _ in 0..6 {
+        k.net.advance(1_000);
+        k.tick();
+    }
+    assert_eq!(motion(&k).last(), Some(&Some(false)));
+
+    // Camera turned off in the app: motion polls get -40919 and slow down.
+    k.net
+        .cams
+        .get_mut(&CAM)
+        .unwrap()
+        .values
+        .insert("smartlife.cam.ipcamera.switch".into(), "off".into());
+    k.net.advance(1_000);
+    k.tick();
+    let polls = |k: &Kasa<FakeHost, FakeNet>| {
+        k.net.cams[&CAM]
+            .calls
+            .iter()
+            .filter(|c| c.1 == "get_detect_event_state")
+            .count()
+    };
+    let n = polls(&k);
+    k.net.advance(1_000);
+    k.tick();
+    assert_eq!(polls(&k), n, "privacy: no poll a second later");
+}
+
+#[test]
+fn stream_pipeline_pumps_rtp_into_pipes() {
+    let mut cam = FakeCam::basic();
+    let mut body =
+        b"--data-boundary--\r\nContent-Type: video/x-h264\r\nContent-Length: 8\r\n\r\n".to_vec();
+    body.extend_from_slice(&[0, 0, 0, 1, 0x65, 1, 2, 3]);
+    body.extend_from_slice(
+        b"--data-boundary--\r\nContent-Type: audio/g711u\r\nContent-Length: 160\r\n\r\n",
+    );
+    body.extend_from_slice(&[0xff; 160]);
+    cam.stream = vec![body];
+    let mut k = with_camera(&creds(), cam);
+    let cam_id = id(&k, "CAM1");
+    let p = k.setup_pipeline(&cam_id).unwrap();
+    assert!(matches!(
+        p.activation,
+        crate::media::ActivationPolicy::OnDemand
+    ));
+    assert!(k.streaming("CAM1"));
+    // Stream auth: base64(password) as the password.
+    assert_eq!(
+        k.net.cams[&CAM].auth_seen.last().unwrap(),
+        "Basic bWVAZXhhbXBsZS5jb206YUhWdWRHVnlNZz09"
+    );
+    k.tick();
+    assert_eq!(k.host.pipes.len(), 2);
+    assert_eq!(
+        k.host.pipes[0].1.borrow().0.len(),
+        1,
+        "one video RTP packet"
+    );
+    assert_eq!(
+        k.host.pipes[1].1.borrow().0.len(),
+        1,
+        "one audio RTP packet"
+    );
+    // The fake stream then closes: the session ends and the pipes close.
+    k.tick();
+    assert!(!k.streaming("CAM1"));
+    assert!(k.host.pipes[0].1.borrow().1);
+    assert!(k.setup_pipeline(&id(&k, "CAM1/siren")).is_err());
+}
+
+#[test]
+fn queued_camera_toggles_run_in_order() {
+    let mut k = with_camera(&creds(), FakeCam::basic());
+    let siren = id(&k, "CAM1/siren");
+    k.execute_command(&siren, &cmd("t1", cap::SWITCH, "toggle", vec![]));
+    k.execute_command(&siren, &cmd("t2", cap::SWITCH, "toggle", vec![]));
+    k.tick();
+    let n = k.host.completed.len();
+    assert_eq!(bool_field(&k.host.completed[n - 2].1, "state"), Some(true));
+    assert_eq!(bool_field(&k.host.completed[n - 1].1, "state"), Some(false));
+    assert_eq!(
+        k.net.cams[&CAM].values["smartlife.cam.ipcamera.siren"],
+        "off"
+    );
+}
+
+#[test]
+fn restored_outlets_need_a_read_before_toggle() {
+    let k = discovered(&[], vec![(STRIP, strip())]);
+    let stored = k.host.storage.get(STORAGE_KEY).cloned().unwrap();
+    let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
+    host.storage.insert(STORAGE_KEY.into(), stored);
+    let mut net = FakeNet::default();
+    net.iot.insert(STRIP, strip());
+    let mut k = Kasa::new(host, net);
+    k.init();
+    assert_eq!(k.host.storage.len(), 1, "replay doesn't rewrite storage");
+    let outlet = id(&k, "STRIP/outlet-00");
+    let r = k.execute_command(&outlet, &cmd("t", cap::SWITCH, "toggle", vec![]));
+    assert!(matches!(r, CommandResult::Err(Error::Unavailable(_))));
+    k.net.advance(60_000);
+    k.tick();
+    let r = k.execute_command(&outlet, &cmd("t", cap::SWITCH, "toggle", vec![]));
+    assert_eq!(bool_field(&r, "state"), Some(false), "outlet 00 was on");
+}
+
+#[test]
+fn bulb_cache_follows_confirmed_commands() {
+    let mut k = discovered(&[], vec![(BULB, bulb()), (DIMMER, dimmer())]);
+    let bulb = id(&k, "BULB1");
+    k.execute_command(
+        &bulb,
+        &cmd(
+            "b",
+            cap::DIMMER,
+            "set",
+            vec![kv("level", Value::FloatVal(0.9))],
+        ),
+    );
+    let hsv = vec![
+        kv("hue", Value::FloatVal(0.5)),
+        kv("saturation", Value::FloatVal(1.0)),
+    ];
+    let r = k.execute_command(&bulb, &cmd("c", cap::COLOR_LIGHT, "set", hsv));
+    assert!(matches!(&r, CommandResult::OkWithState(f)
+        if f.iter().any(|kv| kv.key == "color_temp_kelvin" && matches!(kv.value, Value::IntVal(0)))));
+    assert_eq!(
+        k.net.iot[&BULB].sysinfo["light_state"]["brightness"],
+        json!(90),
+        "brightness kept"
+    );
+    let dim = id(&k, "DIM1");
+    let r = k.execute_command(
+        &dim,
+        &cmd(
+            "d",
+            cap::DIMMER,
+            "set",
+            vec![kv("level", Value::FloatVal(0.001))],
+        ),
+    );
+    assert!(matches!(&r, CommandResult::OkWithState(f)
+        if matches!(f[0].value, Value::FloatVal(l) if (l - 0.01).abs() < 1e-9)));
+}
+
+#[test]
+fn unconfirmed_writes_are_unknown() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    let plug = id(&k, "PLUG1");
+    // A reply without err_code doesn't confirm the write.
+    k.net.iot.get_mut(&PLUG).unwrap().err_code = i64::MIN;
+    let r = k.execute_command(
+        &plug,
+        &cmd(
+            "x",
+            cap::SWITCH,
+            "set",
+            vec![kv("state", Value::BoolVal(true))],
+        ),
+    );
+    assert!(matches!(r, CommandResult::Unknown(_)), "{r:?}");
+}

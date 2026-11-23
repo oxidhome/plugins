@@ -18,7 +18,12 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 base64.workspace = true
 md-5.workspace = true
+oxidhome-sdk.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+oxidhome-manifest.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,114 @@
+manifest_version = 1
+
+[plugin]
+id = "oxidhome.kasa"
+name = "TP-Link Kasa"
+version = "0.1.0"
+authors = ["The OxidHome Contributors"]
+description = "TP-Link Kasa plugs, switches, dimmers, bulbs, power strips and cameras on the local network."
+source = "https://github.com/oxidhome/plugins/tree/main/crates/kasa"
+license = "MIT OR Apache-2.0"
+keywords = ["kasa", "tp-link", "plug", "bulb", "camera"]
+# Kasa needs `streaming-plugin` (sockets, HTTPS to cameras, host-media
+# pipes). The SDK only has `plugin` bindings and the host doesn't load
+# `streaming-plugin` yet (Phase 8), so this builds for `plugin` until then;
+# see README.md, "Platform gaps". The network rules below are what the
+# streaming build will need.
+world = "plugin"
+# Version of the pinned `oxidhome-sdk` crate (`cargo pkgid oxidhome-sdk`).
+sdk_version = "0.1.0"
+
+[runtime]
+# Relative to the install directory, which holds this manifest and the
+# built component side by side.
+wasm = "oxidhome_kasa_plugin.wasm"
+# One instance owns the LAN's Kasa devices; two would fight over them.
+singleton = true
+# Polls, discovery and accepted camera commands advance on tick; the live
+# stream is pumped on tick too (no readiness callback yet).
+tick_interval_ms = 250
+
+[capabilities]
+# Kasa devices only live on the local network. Discovery broadcasts and
+# sweeps UDP 9999; smart-home devices answer on TCP 9999; cameras serve
+# LINKIE2 control on 10443, the live stream and snapshots on 19443, and
+# two-way audio on 18443 (all HTTPS with a self-signed certificate).
+network = [
+  "udp://255.255.255.255:9999",
+  "udp://10.0.0.0/8:9999",
+  "udp://172.16.0.0/12:9999",
+  "udp://192.168.0.0/16:9999",
+  "tcp://10.0.0.0/8:9999",
+  "tcp://172.16.0.0/12:9999",
+  "tcp://192.168.0.0/16:9999",
+  "https://10.0.0.0/8:10443",
+  "https://172.16.0.0/12:10443",
+  "https://192.168.0.0/16:10443",
+  "https://10.0.0.0/8:19443",
+  "https://172.16.0.0/12:19443",
+  "https://192.168.0.0/16:19443",
+  "https://10.0.0.0/8:18443",
+  "https://172.16.0.0/12:18443",
+  "https://192.168.0.0/16:18443",
+]
+# The adopted-device list (a few hundred bytes per device).
+storage_quota_kb = 64
+# One snapshot per camera (~100 KB each), overwritten in place.
+blob_quota_mb = 16
+declares_devices = [
+  "switch",
+  "dimmer",
+  "color-light",
+  "sensor",
+  "video-stream",
+  "audio-stream",
+  "extension(dev.oxidhome.kasa/status-led@1)",
+  "extension(dev.oxidhome.kasa/energy-meter@1)",
+  "extension(dev.oxidhome.kasa/motion@1)",
+  "extension(dev.oxidhome.kasa/pan-tilt@1)",
+  "extension(dev.oxidhome.kasa/camera-control@1)",
+]
+
+[config.discovery]
+type = "bool"
+default = true
+description = "Find devices with the UDP probe on port 9999."
+
+[config.discovery_broadcast]
+type = "bool"
+default = true
+description = "Send the probe to 255.255.255.255. Turn off where broadcast doesn't reach the devices and list discovery_targets instead."
+
+[config.discovery_targets]
+type = "string"
+default = ""
+description = "Comma-separated networks (/24 or narrower) and addresses to probe one by one, e.g. \"192.168.1.0/24, 10.0.0.7\"."
+
+[config.discovery_interval_s]
+type = "int"
+default = 300
+min = 0
+max = 86400
+description = "Seconds between discovery runs; 0 runs it only at start. Values under 60 count as 60."
+
+[config.poll_interval_s]
+type = "int"
+default = 30
+min = 5
+max = 3600
+description = "Seconds between state polls of each device."
+
+[config.camera_username]
+type = "string"
+default = ""
+description = "Kasa account email. Cameras authenticate local requests with the cloud account."
+
+[config.camera_password]
+type = "secret"
+required = false
+description = "Kasa account password. Needed for camera control, snapshots and video; plugs and bulbs work without it."
+
+[config.camera_motion]
+type = "bool"
+default = false
+description = "Poll each camera's own motion detection once a second and publish it."
