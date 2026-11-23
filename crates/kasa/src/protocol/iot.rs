@@ -2,7 +2,7 @@
 //! bulbs, multi-outlet strips) on TCP/9999.
 //!
 //! Wire format: a 4-byte **big-endian** length of the JSON, then the JSON
-//! encrypted with the [`cipher`](super::cipher). The length counts the
+//! encrypted with the [`super::cipher`]. The length counts the
 //! plaintext bytes, which equals the ciphertext length. One request per
 //! connection; the TS plugin opens a new connection per command with a 5 s
 //! timeout, and never sends concurrent requests to one device (parallel
@@ -726,15 +726,30 @@ pub struct EnergyHistory {
     pub months: Vec<(String, f64)>,
 }
 
-/// The two stats requests that cover 30 days and 12 months back from
-/// `today`: the current month + year, and the previous month + year.
+/// The stats requests that cover [`HISTORY_DAYS`] days and
+/// [`HISTORY_MONTHS`] months back from `today`: the current month + year,
+/// the previous month + year, and, when the day window reaches further
+/// (March 1 back to January 31), that month's days too.
 #[must_use]
-pub fn energy_history_requests(today: DeviceDate) -> [Request; 2] {
+pub fn energy_history_requests(today: DeviceDate) -> Vec<Request> {
     let (py, pm) = prev_month(today.year, today.month);
-    [
+    let mut reqs = vec![
         get_energy_stats(today.year, today.month, today.year),
         get_energy_stats(py, pm, today.year - 1),
-    ]
+    ];
+    let mut first = today;
+    for _ in 1..HISTORY_DAYS {
+        first = first.prev_day();
+    }
+    let (ey, em) = prev_month(py, pm);
+    if (first.year, first.month) == (ey, em) {
+        reqs.push(Request::new().call(
+            module::EMETER,
+            "get_daystat",
+            json!({ "year": ey, "month": em }),
+        ));
+    }
+    reqs
 }
 
 /// Builds the history from the stats of both [`energy_history_requests`].
@@ -1083,6 +1098,16 @@ mod tests {
             day: 2,
         };
         let reqs = energy_history_requests(today);
+        assert_eq!(reqs.len(), 2);
+        let mar1 = DeviceDate {
+            year: 2026,
+            month: 3,
+            day: 1,
+        };
+        let three = energy_history_requests(mar1);
+        assert_eq!(three.len(), 3, "March 1 reaches back to January 31");
+        let jan: Value = serde_json::from_str(&three[2].to_json()).unwrap();
+        assert_eq!(jan["emeter"]["get_daystat"], json!({"year":2026,"month":1}));
         let v: Value = serde_json::from_str(&reqs[1].to_json()).unwrap();
         assert_eq!(v["emeter"]["get_daystat"], json!({"year":2025,"month":12}));
         assert_eq!(v["emeter"]["get_monthstat"], json!({"year":2025}));

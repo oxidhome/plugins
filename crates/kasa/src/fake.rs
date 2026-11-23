@@ -50,6 +50,10 @@ pub struct FakeHost {
     pub logs: Vec<(Level, String)>,
     pub pipes: Vec<(PluginPipeConfig, PipeLog)>,
     pub fail_publish: bool,
+    pub fail_storage_get: bool,
+    pub refuse_register: bool,
+    /// Last device id handed out; ids aren't reused after a removal.
+    pub seq: usize,
 }
 
 impl FakeHost {
@@ -91,9 +95,17 @@ impl PipeSink for FakePipe {
 
 impl Host for FakeHost {
     fn register_device(&mut self, info: DeviceInfo) -> Result<String, Error> {
-        let id = format!("dev-{}", self.devices.len() + 1);
+        if self.refuse_register {
+            return Err(Error::PermissionDenied("device quota".into()));
+        }
+        self.seq += 1;
+        let id = format!("dev-{}", self.seq);
         self.devices.push((id.clone(), info));
         Ok(id)
+    }
+    fn remove_device(&mut self, id: &str) -> Result<(), Error> {
+        self.devices.retain(|(i, _)| i != id);
+        Ok(())
     }
     fn update_device(&mut self, id: &str, info: DeviceInfo) -> Result<(), Error> {
         self.updates.push((id.to_string(), info.clone()));
@@ -126,11 +138,18 @@ impl Host for FakeHost {
     fn config(&mut self, key: &str) -> Option<Value> {
         self.config.get(key).cloned()
     }
-    fn storage_get(&mut self, key: &str) -> Option<Value> {
-        self.storage.get(key).cloned()
+    fn storage_get(&mut self, key: &str) -> Result<Option<Value>, Error> {
+        if self.fail_storage_get {
+            return Err(Error::Unavailable("storage down".into()));
+        }
+        Ok(self.storage.get(key).cloned())
     }
     fn storage_set(&mut self, key: &str, value: Value) -> Result<(), Error> {
         self.storage.insert(key.to_string(), value);
+        Ok(())
+    }
+    fn storage_delete(&mut self, key: &str) -> Result<(), Error> {
+        self.storage.remove(key);
         Ok(())
     }
     fn blob_write(&mut self, name: &str, data: Vec<u8>, mime: &str) -> Result<String, Error> {
@@ -205,10 +224,11 @@ impl FakeIot {
         };
         let code = self.err_code;
         let write = |me: &mut Self, f: &dyn Fn(&mut Json)| {
-            if code == 0 {
+            // `i64::MIN` simulates a write that landed but whose
+            // acknowledgement came back without `err_code`.
+            if code == 0 || code == i64::MIN {
                 f(&mut me.sysinfo);
             }
-            // `i64::MIN` simulates an acknowledgement without `err_code`.
             if code == i64::MIN {
                 json!({})
             } else {
@@ -377,6 +397,8 @@ pub struct FakeNet {
     pub unix_ms: u64,
     pub slept_ms: u64,
     pub tcp_count: usize,
+    /// Clock advance per TCP or HTTPS call (a slow or timing-out device).
+    pub latency_ms: u64,
 }
 
 impl FakeNet {
@@ -402,6 +424,7 @@ impl Net for FakeNet {
         _timeout_ms: u64,
     ) -> Result<Vec<u8>, NetError> {
         self.tcp_count += 1;
+        self.now_ms += self.latency_ms;
         let Some(d) = self.iot.get_mut(addr.ip()) else {
             return Err(NetError::NotSent("connection refused".into()));
         };
@@ -439,6 +462,7 @@ impl Net for FakeNet {
         self.udp_open = false;
     }
     fn https(&mut self, req: &HttpRequest, _timeout_ms: u64) -> Result<HttpResponse, NetError> {
+        self.now_ms += self.latency_ms;
         let ip: Ipv4Addr = req
             .host
             .parse()

@@ -94,11 +94,11 @@ TCP exchange:
 
 | What happened | Result |
 |---|---|
-| The device confirmed the change | `ok-with-state`, carrying the state that was set |
+| The device confirmed the change | `ok-with-state`, carrying the state that was set, plus a `state-changed` event so subscribers see it |
 | The arguments were invalid | `err(invalid-argument)`; nothing is sent to the device |
 | The connection couldn't be made | `err(unavailable)`; nothing reached the device |
 | The device returned `err_code` ≠ 0 | `err(unavailable)`, or `err(invalid-argument)` for `-3` |
-| The request was sent but no usable reply came back | `unknown` |
+| The request was sent but no usable reply came back | `unknown`; the cached on/off is dropped, so a `toggle` waits for the next read |
 
 **Camera commands** first answer `accepted`. On the next `tick` the plugin makes the call
 and reports the result with `complete-command`:
@@ -110,7 +110,10 @@ and reports the result with `complete-command`:
 | The camera is off (`-40919`) | `err(unavailable)` |
 | PTZ argument or end stop (`-41203`) | `err(invalid-argument)` |
 | Unsupported (`-10008`) | `err(invalid-argument)` |
-| The call timed out after the request was sent | `unknown` |
+| The call timed out after the request was sent, or the camera answered HTTP 5xx | `unknown`; a later `toggle` waits for the next read |
+
+A tick starts new network work only during its first 12 s, well inside the host's 30 s
+watchdog. Queued commands and due polls that don't fit wait for the next tick, in order.
 
 ## Configuration
 
@@ -125,8 +128,12 @@ and reports the result with `complete-command`:
 | `camera_password` | secret | none | Kasa account password. Without it, cameras are registered, but their commands return `unavailable` and they are not polled. |
 | `camera_motion` | bool | `false` | Poll each camera's motion state once a second. |
 
-Adopted devices are remembered in plugin storage (`devices`). They come back on restart
-before discovery runs, and follow DHCP address changes when discovery sees them again.
+Adopted devices are remembered in plugin storage: an index (`devices`) and one small
+record per device (`device/<id>`, names clipped to 64 characters). Only changed records
+are written. They come back on restart before discovery runs, and follow DHCP address
+changes when discovery sees them again. If storage can't be read at start, saving waits
+until a read succeeds, so a partial discovery can't overwrite the stored list. Outlets a
+strip stops reporting are removed from the host.
 
 ## Required capabilities
 
@@ -138,7 +145,7 @@ before discovery runs, and follow DHCP address changes when discovery sees them 
   - HTTPS 18443: two-way audio. The talkback framing is implemented, but nothing drives
     it yet.
 - **Devices:** the capability keys in the mapping table.
-- **Storage:** 64 KB.
+- **Storage:** 512 KB, for up to 256 devices at a few hundred bytes to ~2 KB each.
 - **Blobs:** 16 MB, enough for one snapshot per camera, overwritten in place.
 
 ## Security model

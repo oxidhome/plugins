@@ -47,6 +47,9 @@ impl Host for WasiHost {
     fn update_device(&mut self, id: &str, info: DeviceInfo) -> Result<(), Error> {
         host::update_device(&id.to_string(), &info)
     }
+    fn remove_device(&mut self, id: &str) -> Result<(), Error> {
+        host::remove_device(&id.to_string())
+    }
     fn publish_state(
         &mut self,
         device: &str,
@@ -73,11 +76,14 @@ impl Host for WasiHost {
     fn config(&mut self, key: &str) -> Option<Value> {
         host::config::get(key).ok().flatten()
     }
-    fn storage_get(&mut self, key: &str) -> Option<Value> {
-        host::storage::get(key).ok().flatten()
+    fn storage_get(&mut self, key: &str) -> Result<Option<Value>, Error> {
+        host::storage::get(key)
     }
     fn storage_set(&mut self, key: &str, value: Value) -> Result<(), Error> {
         host::storage::set(key, &value)
+    }
+    fn storage_delete(&mut self, key: &str) -> Result<(), Error> {
+        host::storage::delete(key)
     }
     fn blob_write(&mut self, name: &str, data: Vec<u8>, mime: &str) -> Result<String, Error> {
         host::blobs::write(name, &data, Some(mime))
@@ -159,8 +165,25 @@ impl Net for WasiNet {
         };
         let mut s =
             TcpStream::connect_timeout(&SocketAddr::V4(addr), ms(timeout_ms)).map_err(not_sent)?;
-        s.set_write_timeout(left()).map_err(not_sent)?;
-        s.write_all(frame).map_err(sent)?;
+        // Track what the socket accepted: an error before the first byte
+        // left means nothing reached the device.
+        let mut written = 0;
+        let fail = |written: usize, e: &dyn std::fmt::Display| {
+            if written == 0 { not_sent(e) } else { sent(e) }
+        };
+        while written < frame.len() {
+            let Some(remaining) = left() else {
+                return Err(fail(written, &"timed out while sending"));
+            };
+            s.set_write_timeout(Some(remaining))
+                .map_err(|e| fail(written, &e))?;
+            match s.write(&frame[written..]) {
+                Ok(0) => return Err(fail(written, &"connection closed while sending")),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(fail(written, &e)),
+            }
+        }
         let mut dec = FrameDecoder::new();
         let mut raw = Vec::new();
         let mut buf = vec![0u8; 16 * 1024];

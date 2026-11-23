@@ -138,8 +138,8 @@ pub fn parse_reply(address: Ipv4Addr, datagram: &[u8]) -> Option<Discovered> {
     let id = sysinfo
         .device_id
         .clone()
-        .or_else(|| sysinfo.mac.clone())
-        .filter(|s| !s.is_empty())?;
+        .filter(|s| !s.is_empty())
+        .or_else(|| sysinfo.mac.clone().filter(|s| !s.is_empty()))?;
     Some(Discovered {
         address,
         id,
@@ -157,15 +157,25 @@ fn extract_identity(root: &Value) -> Option<&Value> {
         if depth > 4 {
             return;
         }
-        let Value::Object(map) = node else { return };
-        if ["model", "alias", "deviceId", "dev_id"]
-            .iter()
-            .any(|k| get_str(node, k).is_some())
-        {
-            out.push(node);
-        }
-        for v in map.values() {
-            walk(v, depth + 1, out);
+        // Like `Object.values`, arrays are walked too.
+        match node {
+            Value::Object(map) => {
+                if ["model", "alias", "deviceId", "dev_id"]
+                    .iter()
+                    .any(|k| get_str(node, k).is_some())
+                {
+                    out.push(node);
+                }
+                for v in map.values() {
+                    walk(v, depth + 1, out);
+                }
+            }
+            Value::Array(list) => {
+                for v in list {
+                    walk(v, depth + 1, out);
+                }
+            }
+            _ => {}
         }
     }
     let mut candidates = Vec::new();
@@ -320,6 +330,15 @@ mod tests {
         assert_eq!(d.class, Some(KasaClass::Camera));
         assert_eq!(d.sysinfo.mac.as_deref(), Some("503DD1D278D4"));
         assert_eq!(d.sysinfo.sw_ver.as_deref(), Some("2.3.26"));
+    }
+
+    #[test]
+    fn walks_arrays_and_skips_empty_ids() {
+        let v = json!({"result":[{"model":"KP115","alias":"A","deviceId":"","mac":"AA:BB",
+            "type":"IOT.SMARTPLUGSWITCH"}]});
+        let d = parse_reply(IP, &datagram(&v)).unwrap();
+        assert_eq!(d.id, "AA:BB");
+        assert_eq!(d.class, Some(KasaClass::Plug));
     }
 
     #[test]

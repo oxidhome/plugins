@@ -51,8 +51,9 @@ network = [
   "https://172.16.0.0/12:18443",
   "https://192.168.0.0/16:18443",
 ]
-# The adopted-device list (a few hundred bytes per device).
-storage_quota_kb = 64
+# The adopted-device index plus one record per device (a few hundred
+# bytes; up to ~2 KB for a strip), for up to 256 devices.
+storage_quota_kb = 512
 # One snapshot per camera (~100 KB each), overwritten in place.
 blob_quota_mb = 16
 declares_devices = [

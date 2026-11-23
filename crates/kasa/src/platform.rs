@@ -24,6 +24,8 @@ pub trait Host {
     fn register_device(&mut self, info: DeviceInfo) -> Result<String, Error>;
     /// `host-devices::update-device`.
     fn update_device(&mut self, id: &str, info: DeviceInfo) -> Result<(), Error>;
+    /// `device-registry::remove-device`.
+    fn remove_device(&mut self, id: &str) -> Result<(), Error>;
     /// `host-events::publish-event` with a `state-changed` payload.
     fn publish_state(
         &mut self,
@@ -37,9 +39,11 @@ pub trait Host {
     /// `host-config::get-config`.
     fn config(&mut self, key: &str) -> Option<Value>;
     /// `storage::get`.
-    fn storage_get(&mut self, key: &str) -> Option<Value>;
+    fn storage_get(&mut self, key: &str) -> Result<Option<Value>, Error>;
     /// `storage::set`.
     fn storage_set(&mut self, key: &str, value: Value) -> Result<(), Error>;
+    /// `storage::delete`.
+    fn storage_delete(&mut self, key: &str) -> Result<(), Error>;
     /// `blob-store::write`; returns the blob id.
     fn blob_write(&mut self, name: &str, data: Vec<u8>, mime: &str) -> Result<String, Error>;
     /// `logging::log`.

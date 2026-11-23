@@ -97,7 +97,7 @@ pub mod mirror {
     }
 }
 use crate::platform::{ByteStream, NetError, PipeSink};
-use crate::protocol::multipart::{MultipartParser, PartKind, SpsPps, StreamError, nal_units};
+use crate::protocol::multipart::{MultipartParser, PartKind, SpsPps, StreamError, more_nals_than};
 use crate::protocol::rtp::{
     G711_CLOCK_HZ, G711Packetizer, H264_CLOCK_HZ, H264Packetizer, rtp_ticks,
 };
@@ -259,7 +259,7 @@ impl StreamSession {
                     // A real access unit has a handful of NAL units; a part
                     // with thousands would make the packetizer allocate one
                     // buffer per slice.
-                    if nal_units(&part.body).len() > MAX_NALS_PER_PART {
+                    if more_nals_than(&part.body, MAX_NALS_PER_PART) {
                         continue;
                     }
                     if !self.sps_pps.complete() {

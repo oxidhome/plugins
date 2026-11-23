@@ -27,3 +27,7 @@ toml.workspace = true
 
 [lints]
 workspace = true
+
+# The md-5 package is imported as `md5`, which machete doesn't map back.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]

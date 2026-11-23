@@ -345,6 +345,26 @@ impl SpsPps {
     }
 }
 
+/// Whether an Annex B buffer has more than `max` start codes, without
+/// allocating (bounds the work for a hostile part before splitting it).
+#[must_use]
+pub fn more_nals_than(data: &[u8], max: usize) -> bool {
+    let mut count = 0;
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            count += 1;
+            if count > max {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Splits an Annex B buffer into NAL units (start codes stripped). Bytes
 /// before the first start code are skipped.
 #[must_use]

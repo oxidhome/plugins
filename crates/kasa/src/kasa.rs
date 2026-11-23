@@ -38,11 +38,26 @@ use oxidhome_sdk::bindings::oxidhome::plugin::devices::{Command, CommandResult};
 use oxidhome_sdk::bindings::oxidhome::plugin::logging::Level;
 use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
 
-/// Storage key of the adopted-device list.
+/// Storage key of the adopted-device index (a JSON array of ids); each
+/// device's record sits under [`record_key`].
 pub const STORAGE_KEY: &str = "devices";
+
+/// Longest name kept in a stored record, so one record stays small.
+const MAX_STORED_NAME: usize = 64;
+
+/// Storage key of one adopted device's record.
+#[must_use]
+pub fn record_key(kasa_id: &str) -> String {
+    format!("device/{kasa_id}")
+}
 /// Smart-home polls per tick, so one tick stays short when many devices
 /// are due together.
 pub const MAX_IOT_POLLS_PER_TICK: usize = 4;
+/// Network time one tick may start new work in. The host's watchdog kills
+/// a tick at 30 s; work begun before the budget runs out can still take
+/// one full timeout (10 s for a snapshot), and a camera poll makes up to
+/// three 5 s calls, so the budget leaves room for that.
+pub const TICK_BUDGET_MS: u64 = 12_000;
 /// Unicast probes sent per tick (3 ms apart, ~200 ms of a tick).
 pub const PROBES_PER_TICK: usize = 64;
 /// Most devices one instance adopts. Discovery replies are unauthenticated
@@ -165,6 +180,10 @@ impl std::fmt::Display for CamError {
 }
 
 /// The plugin.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent lifecycle flags (restore, dirty, unread inventory, warned), not a state machine"
+)]
 pub struct Kasa<H: Host, N: Net> {
     /// The host surface.
     pub host: H,
@@ -182,6 +201,13 @@ pub struct Kasa<H: Host, N: Net> {
     dirty: bool,
     /// Replaying the stored list (nothing to save yet).
     restoring: bool,
+    /// The stored device list could not be read; saves wait for a read.
+    inventory_unread: bool,
+    tick_started_ms: u64,
+    /// Device records as last stored, by Kasa id.
+    saved: HashMap<String, String>,
+    /// The index as last stored.
+    saved_index: Option<String>,
     warned_full: bool,
 }
 
@@ -209,6 +235,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
             streams: HashMap::new(),
             dirty: false,
             restoring: false,
+            inventory_unread: false,
+            tick_started_ms: 0,
+            saved: HashMap::new(),
+            saved_index: None,
             warned_full: false,
         }
     }
@@ -224,17 +254,24 @@ impl<H: Host, N: Net> Kasa<H, N> {
         for w in self.cfg.warnings.clone() {
             self.log(Level::Warn, &w);
         }
-        // Replaying must not save: an interruption mid-way would leave a
-        // truncated list behind.
-        self.restoring = true;
-        for d in self.load_persisted() {
-            self.adopt(&d, false);
-        }
-        self.restoring = false;
+        self.restore();
         self.dirty = false;
         if self.cfg.discovery {
             self.next_discovery_ms = Some(self.net.monotonic_ms());
         }
+    }
+
+    fn restore(&mut self) {
+        // Replaying must not save: an interruption mid-way would leave a
+        // truncated list behind.
+        self.restoring = true;
+        for d in self.load_persisted() {
+            // A retried read must not undo what was learned meanwhile.
+            if !self.devices.contains_key(&d.id) {
+                self.adopt(&d, false);
+            }
+        }
+        self.restoring = false;
     }
 
     /// Closes the discovery socket and every stream.
@@ -265,29 +302,54 @@ impl<H: Host, N: Net> Kasa<H, N> {
 
     // ── Persistence ────────────────────────────────────────────────────
 
+    /// Reads the index, then each device's record. Any read error holds
+    /// saves (see `inventory_unread`) and is retried next tick: saving
+    /// now would replace the stored list with only the devices that happen
+    /// to be online.
     fn load_persisted(&mut self) -> Vec<Discovered> {
-        let Some(Value::JsonVal(s)) = self.host.storage_get(STORAGE_KEY) else {
-            return Vec::new();
+        match self.read_inventory() {
+            Ok(list) => {
+                self.inventory_unread = false;
+                list
+            }
+            Err(e) => {
+                if !self.inventory_unread {
+                    self.log(
+                        Level::Warn,
+                        &format!("reading the stored device list failed: {e:?}; retrying"),
+                    );
+                }
+                self.inventory_unread = true;
+                Vec::new()
+            }
+        }
+    }
+
+    fn read_inventory(&mut self) -> Result<Vec<Discovered>, Error> {
+        let Some(Value::JsonVal(s)) = self.host.storage_get(STORAGE_KEY)? else {
+            return Ok(Vec::new());
         };
-        let Ok(Json::Array(list)) = serde_json::from_str::<Json>(&s) else {
+        let Ok(Json::Array(ids)) = serde_json::from_str::<Json>(&s) else {
             self.log(
                 Level::Warn,
                 "stored device list is unreadable; starting empty",
             );
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        list.iter()
-            .filter_map(|e| {
-                let address = e.get("address")?.as_str()?.parse().ok()?;
-                let sysinfo = SysInfo::parse(e.get("sysinfo")?);
-                Some(Discovered {
-                    address,
-                    id: e.get("id")?.as_str()?.to_string(),
-                    class: discovery::KasaClass::parse(e.get("class")?.as_str()?),
-                    sysinfo,
-                })
-            })
-            .collect()
+        let mut out = Vec::new();
+        for id in ids.iter().filter_map(Json::as_str).take(MAX_DEVICES) {
+            let Some(Value::JsonVal(rec)) = self.host.storage_get(&record_key(id))? else {
+                continue;
+            };
+            let parsed = serde_json::from_str::<Json>(&rec).ok();
+            if let Some(d) = parsed.as_ref().and_then(parse_record) {
+                self.saved.insert(id.to_string(), rec);
+                out.push(d);
+            }
+        }
+        // The index as stored, so an unchanged list isn't rewritten.
+        self.saved_index = Some(s);
+        Ok(out)
     }
 
     fn mark_dirty(&mut self) {
@@ -298,47 +360,67 @@ impl<H: Host, N: Net> Kasa<H, N> {
 
     /// Saves the adopted-device list once per tick when it changed.
     fn flush(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.persist();
+        if self.dirty && !self.inventory_unread && self.persist() {
+            self.dirty = false;
         }
     }
 
-    fn persist(&mut self) {
-        let list: Vec<Json> = self
+    /// Writes changed device records, then the index, then drops records
+    /// of devices that left. One value per device keeps each write far
+    /// under the host's 64 KiB value cap. Whether everything was saved; a
+    /// failure is retried next tick.
+    fn persist(&mut self) -> bool {
+        let records: Vec<(String, String)> = self
             .devices
             .iter()
-            .map(|(id, p)| {
-                let mut sys = json!({
-                    "deviceId": id,
-                    "alias": p.ident.name,
-                    "is_color": u8::from(p.color),
-                    "is_variable_color_temp": u8::from(p.temp),
-                    "children": p.children.iter().map(|c| json!({"id": c.id, "alias": c.alias})).collect::<Vec<_>>(),
-                });
-                if let Some(m) = &p.ident.model {
-                    sys["model"] = json!(m);
-                }
-                if let Some(f) = &p.ident.firmware {
-                    sys["sw_ver"] = json!(f);
-                }
-                if let Some(m) = &p.ident.mac {
-                    sys["mac"] = json!(m);
-                }
-                if p.features.emeter {
-                    sys["feature"] = json!("ENE");
-                }
-                if p.features.led {
-                    sys["led_off"] = json!(0);
-                }
-                json!({ "id": id, "class": p.class.as_str(), "address": p.ident.address, "sysinfo": sys })
-            })
+            .map(|(id, p)| (id.clone(), record(id, p).to_string()))
             .collect();
-        if let Err(e) = self
-            .host
-            .storage_set(STORAGE_KEY, Value::JsonVal(Json::Array(list).to_string()))
-        {
-            self.log(Level::Warn, &format!("persisting devices failed: {e:?}"));
+        let mut ok = true;
+        for (id, rec) in &records {
+            if self.saved.get(id) == Some(rec) {
+                continue;
+            }
+            match self
+                .host
+                .storage_set(&record_key(id), Value::JsonVal(rec.clone()))
+            {
+                Ok(()) => {
+                    self.saved.insert(id.clone(), rec.clone());
+                }
+                Err(e) => {
+                    ok = false;
+                    self.log(Level::Warn, &format!("saving device {id} failed: {e:?}"));
+                }
+            }
         }
+        if !ok {
+            // The index must not name a record that isn't stored.
+            return false;
+        }
+        let index = Json::Array(records.iter().map(|(id, _)| json!(id)).collect()).to_string();
+        if self.saved_index.as_ref() != Some(&index) {
+            if let Err(e) = self
+                .host
+                .storage_set(STORAGE_KEY, Value::JsonVal(index.clone()))
+            {
+                self.log(Level::Warn, &format!("persisting devices failed: {e:?}"));
+                return false;
+            }
+            self.saved_index = Some(index);
+        }
+        let gone: Vec<String> = self
+            .saved
+            .keys()
+            .filter(|id| !self.devices.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in gone {
+            // A leftover record is harmless (the index doesn't name it).
+            if self.host.storage_delete(&record_key(&id)).is_ok() {
+                self.saved.remove(&id);
+            }
+        }
+        true
     }
 
     // ── Adoption and registration ─────────────────────────────────────
@@ -430,6 +512,35 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
         for (role, name) in roles {
             self.ensure_registered(kasa_id, &role, name.as_deref());
+        }
+        self.retire_outlets(kasa_id);
+    }
+
+    /// Removes outlets the strip no longer reports, on the host and here.
+    fn retire_outlets(&mut self, kasa_id: &str) {
+        let Some(p) = self.devices.get(kasa_id) else {
+            return;
+        };
+        let retired: Vec<(String, String)> = p
+            .registered
+            .iter()
+            .filter(|(_, r)| match &r.role {
+                Role::Outlet { child_id } => !p.children.iter().any(|c| &c.id == child_id),
+                _ => false,
+            })
+            .map(|(local, r)| (local.clone(), r.device_id.clone()))
+            .collect();
+        for (local, id) in retired {
+            if let Err(e) = self.host.remove_device(&id) {
+                // Kept (and retried next read); commands to it are refused.
+                self.log(Level::Warn, &format!("remove-device {local} failed: {e:?}"));
+                continue;
+            }
+            self.routes.remove(&id);
+            self.published.retain(|(dev, _), _| dev != &id);
+            if let Some(p) = self.devices.get_mut(kasa_id) {
+                p.registered.remove(&local);
+            }
         }
     }
 
@@ -550,13 +661,19 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let Some(id) = self.device_id(kasa_id, role) else {
             return;
         };
-        let key = (id.clone(), capability.to_string());
+        self.publish_to(&id, capability, fields);
+    }
+
+    /// [`Self::publish`] by host device id. The dedup cache only advances
+    /// when the host took the event, so a refused one is retried.
+    fn publish_to(&mut self, id: &str, capability: &str, fields: Vec<KeyValue>) {
+        let key = (id.to_string(), capability.to_string());
         let digest = format!("{fields:?}");
         if self.published.get(&key) == Some(&digest) {
             return;
         }
         let now = self.net.unix_ms();
-        match self.host.publish_state(&id, capability, fields, now) {
+        match self.host.publish_state(id, capability, fields, now) {
             Ok(()) => {
                 self.published.insert(key, digest);
             }
@@ -564,13 +681,11 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
     }
 
-    /// Records state that a command result already carried, so the next
-    /// poll doesn't publish it again.
-    fn note_published(&mut self, device_id: &str, capability: &str, fields: &[KeyValue]) {
-        self.published.insert(
-            (device_id.to_string(), capability.to_string()),
-            format!("{fields:?}"),
-        );
+    /// Publishes the state a confirmed command set. The host projects an
+    /// `ok-with-state` into the device snapshot but only `publish-event`
+    /// notifies subscribers, so automations see the change through this.
+    fn publish_confirmed(&mut self, device_id: &str, capability: &str, fields: &[KeyValue]) {
+        self.publish_to(device_id, capability, fields.to_vec());
     }
 
     // ── Smart-home state ──────────────────────────────────────────────
@@ -590,7 +705,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
             p.features.emeter = emeter;
             reregister = true;
         }
-        if p.class == KasaClass::Strip {
+        // A reply without children is partial, not a strip that lost all
+        // its outlets.
+        if p.class == KasaClass::Strip && !s.children.is_empty() {
             let children = bounded_children(&s.children);
             let ids: Vec<&str> = p.children.iter().map(|c| c.id.as_str()).collect();
             let new_ids: Vec<&str> = children.iter().map(|c| c.id.as_str()).collect();
@@ -601,8 +718,11 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
         let role = p.main_role();
         let class = p.class;
+        // Every read reconciles: registrations the host refused earlier are
+        // retried, retired outlets removed (no host calls when nothing
+        // changed).
+        self.register_all(kasa_id);
         if reregister {
-            self.register_all(kasa_id);
             self.mark_dirty();
         }
         if let Some(off) = s.led_off {
@@ -861,8 +981,11 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let states: Vec<(OnOffFeature, bool)> =
             p.cam.features.iter().map(|(f, v)| (*f, *v)).collect();
         let ptz_state = p.cam.ptz.map(|c| pan_tilt_fields(c, &p.cam.presets));
+        // Every successful probe reconciles, so a registration or
+        // capability update the host refused is retried.
+        self.register_all(kasa_id);
         if reregister {
-            self.register_all(kasa_id);
+            self.mark_dirty();
         }
         for (f, on) in states {
             match f {
@@ -903,10 +1026,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
         // A camera that is off detects nothing.
         if p.cam.features.get(&OnOffFeature::CameraEnabled) == Some(&false) {
             p.cam.next_motion_ms = now + camera::MOTION_POLL_PRIVACY_MS;
-            let change = p.cam.motion.clear();
-            if let Some(d) = change {
-                self.publish(kasa_id, &Role::Camera, &Ext::Motion.key(), motion_fields(d));
-            }
+            p.cam.motion.clear();
+            self.publish_motion(kasa_id);
             return;
         }
         let unix_s = self.net.unix_ms() / 1000;
@@ -917,7 +1038,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
             return;
         };
         let mut log = None;
-        let change = match result.and_then(|v| camera::parse_motion(&v).map_err(CamError::Linkie)) {
+        match result.and_then(|v| camera::parse_motion(&v).map_err(CamError::Linkie)) {
             Ok(moving) => {
                 if p.cam.motion_failing {
                     p.cam.motion_failing = false;
@@ -928,13 +1049,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 }
                 p.cam.motion_backoff_ms = camera::MOTION_POLL_MS;
                 p.cam.next_motion_ms = now + camera::MOTION_POLL_MS;
-                p.cam.motion.observe(moving, now)
+                p.cam.motion.observe(moving, now);
             }
             Err(CamError::Linkie(e)) if e.code() == Some(err::CAMERA_OFF) => {
                 // Turned off outside the plugin; the state poll catches up.
                 p.cam.features.insert(OnOffFeature::CameraEnabled, false);
                 p.cam.next_motion_ms = now + camera::MOTION_POLL_PRIVACY_MS;
-                p.cam.motion.clear()
+                p.cam.motion.clear();
             }
             Err(e) => {
                 if !p.cam.motion_failing {
@@ -946,31 +1067,33 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 }
                 p.cam.next_motion_ms = now + p.cam.motion_backoff_ms;
                 p.cam.motion_backoff_ms = camera::next_motion_backoff(p.cam.motion_backoff_ms);
-                p.cam.motion.settle(now)
+                p.cam.motion.settle(now);
             }
-        };
+        }
         if let Some((l, m)) = log {
             self.log(l, &m);
         }
+        // The held state, every time: the deduper publishes transitions,
+        // the first (idle) state, and retries a refused event.
+        self.publish_motion(kasa_id);
+    }
+
+    fn publish_motion(&mut self, kasa_id: &str) {
         let detected = self
             .devices
             .get(kasa_id)
             .is_some_and(|p| p.cam.motion.detected());
-        let first = self
-            .device_id(kasa_id, &Role::Camera)
-            .is_some_and(|id| !self.published.contains_key(&(id, Ext::Motion.key())));
-        if let Some(d) = change {
-            self.publish(kasa_id, &Role::Camera, &Ext::Motion.key(), motion_fields(d));
-        } else if first {
-            // Start from a known idle state rather than whatever the host
-            // last held.
-            self.publish(
-                kasa_id,
-                &Role::Camera,
-                &Ext::Motion.key(),
-                motion_fields(detected),
-            );
-        }
+        self.publish(
+            kasa_id,
+            &Role::Camera,
+            &Ext::Motion.key(),
+            motion_fields(detected),
+        );
+    }
+
+    fn motion_published(&self, kasa_id: &str) -> bool {
+        self.device_id(kasa_id, &Role::Camera)
+            .is_some_and(|id| self.published.contains_key(&(id, Ext::Motion.key())))
     }
 
     // ── Discovery ─────────────────────────────────────────────────────
@@ -1057,6 +1180,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// One `tick`: finish accepted camera commands, advance discovery, run
     /// due polls, pump streams.
     pub fn tick(&mut self) {
+        self.tick_started_ms = self.net.monotonic_ms();
+        if self.inventory_unread {
+            self.restore();
+        }
         self.run_queue();
         let now = self.net.monotonic_ms();
         self.discovery_step(now);
@@ -1073,6 +1200,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
         due.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         let mut iot_polls = 0;
         for (_, id, class) in due {
+            // Left due: picked up first (most overdue) next tick.
+            if self.over_budget() {
+                break;
+            }
             if class == KasaClass::Camera {
                 self.poll_camera(&id, now);
             } else if iot_polls < MAX_IOT_POLLS_PER_TICK {
@@ -1091,11 +1222,17 @@ impl<H: Host, N: Net> Kasa<H, N> {
             for id in cams {
                 let due = self.devices.get_mut(&id).map(|p| {
                     let change = p.cam.motion.settle(now);
-                    (p.cam.next_motion_ms <= now, change)
+                    (p.cam.next_motion_ms <= now, change.is_some())
                 });
-                if let Some((due, change)) = due {
-                    if let Some(d) = change {
-                        self.publish(&id, &Role::Camera, &Ext::Motion.key(), motion_fields(d));
+                if self.over_budget() {
+                    break;
+                }
+                if let Some((due, changed)) = due {
+                    // Re-offered every tick once published: the dedup
+                    // cache only advances on success, so a refused idle
+                    // event is retried instead of leaving motion stuck on.
+                    if changed || self.motion_published(&id) {
+                        self.publish_motion(&id);
                     }
                     if due {
                         self.poll_motion(&id, now);
@@ -1175,11 +1312,14 @@ impl<H: Host, N: Net> Kasa<H, N> {
         match result {
             Ok(()) => {
                 self.remember_iot_state(kasa_id, role, &capability, &fields);
-                self.note_published(device, &capability, &fields);
+                self.publish_confirmed(device, &capability, &fields);
                 CommandResult::OkWithState(fields)
             }
             Err(CallError::Net(e)) if !e.maybe_sent() => unavailable(e.message().to_string()),
-            Err(CallError::Net(e)) => CommandResult::Unknown(e.message().to_string()),
+            Err(CallError::Net(e)) => {
+                self.forget_switch_state(kasa_id, role, &capability);
+                CommandResult::Unknown(e.message().to_string())
+            }
             Err(CallError::Iot(e @ IotError::Device { code, .. })) => {
                 if code == -3 {
                     invalid(e.to_string())
@@ -1187,7 +1327,26 @@ impl<H: Host, N: Net> Kasa<H, N> {
                     unavailable(e.to_string())
                 }
             }
-            Err(CallError::Iot(e)) => CommandResult::Unknown(format!("reply unusable: {e}")),
+            Err(CallError::Iot(e)) => {
+                self.forget_switch_state(kasa_id, role, &capability);
+                CommandResult::Unknown(format!("reply unusable: {e}"))
+            }
+        }
+    }
+
+    /// After a write that may or may not have landed, the cached on/off is
+    /// no longer trustworthy: a toggle needs a fresh read first.
+    fn forget_switch_state(&mut self, kasa_id: &str, role: &Role, capability: &str) {
+        let Some(p) = self.devices.get_mut(kasa_id) else {
+            return;
+        };
+        if capability != cap::SWITCH {
+            return;
+        }
+        match role {
+            Role::Outlet { .. } => p.observed = false,
+            Role::Bulb { .. } => p.light = None,
+            _ => p.relay_on = None,
         }
     }
 
@@ -1208,7 +1367,12 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 _ => None,
             });
         if matches!(role, Role::Bulb { .. }) && capability != cap::SWITCH {
-            remember_light(p.light.get_or_insert_with(iot::LightState::default), fields);
+            // Without a read there is no known power state to keep the
+            // brightness next to; inventing `on: false` would mislead a
+            // later toggle.
+            if let Some(light) = p.light.as_mut() {
+                remember_light(light, fields);
+            }
             return;
         }
         if capability != cap::SWITCH {
@@ -1273,6 +1437,11 @@ impl<H: Host, N: Net> Kasa<H, N> {
                     .ok_or_else(|| {
                         invalid("pan-tilt::move requires `direction`: left|right|top|bottom")
                     })?;
+                if (args::has(a, "speed") && args::int(a, "speed").is_none())
+                    || (args::has(a, "magnitude") && args::number(a, "magnitude").is_none())
+                {
+                    return Err(invalid("`speed` must be an integer, `magnitude` a number"));
+                }
                 let speed = match (args::int(a, "speed"), args::number(a, "magnitude")) {
                     (Some(s), _) if (1..=10).contains(&s) => u8::try_from(s).unwrap_or(1),
                     (Some(_), _) => return Err(invalid("`speed` must be 1..=10")),
@@ -1293,16 +1462,21 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
     }
 
+    /// Whether this tick has used its [`TICK_BUDGET_MS`].
+    fn over_budget(&self) -> bool {
+        self.net.monotonic_ms().saturating_sub(self.tick_started_ms) >= TICK_BUDGET_MS
+    }
+
+    /// Runs queued camera commands in order, as far as the tick budget
+    /// allows; the rest wait for the next tick.
     fn run_queue(&mut self) {
-        while let Some(job) = self.queue.pop_front() {
+        while !self.over_budget()
+            && let Some(job) = self.queue.pop_front()
+        {
             let result = self.run_camera_op(&job);
             if let Err(e) = self.host.complete_command(&job.command_id, result) {
-                // The host never projected the result: forget what it
-                // carried so the next poll publishes the state.
-                self.published
-                    .retain(|(dev, cap), _| dev != &job.device_id || cap == "__info");
-                // Expired on the host; the device state is published by
-                // the next poll anyway.
+                // Expired on the host. The state it carried was published
+                // as an event already.
                 self.log(
                     Level::Warn,
                     &format!("complete-command {} failed: {e:?}", job.command_id),
@@ -1339,7 +1513,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
                         OnOffFeature::CameraEnabled => (cap::SWITCH.into(), switch_fields(!*on)),
                         _ => (cap::SWITCH.into(), switch_fields(*on)),
                     };
-                    self.note_published(&job.device_id, &capability, &fields);
+                    self.publish_confirmed(&job.device_id, &capability, &fields);
                     CommandResult::OkWithState(fields)
                 }),
             CameraOp::Reboot => self
@@ -1359,7 +1533,25 @@ impl<H: Host, N: Net> Kasa<H, N> {
         };
         match outcome {
             Ok(r) => r,
-            Err(e) => cam_error_result(&e),
+            // A server error after a write doesn't say whether it landed.
+            Err(CamError::Linkie(LinkieError::Http(s))) if s >= 500 => {
+                self.forget_camera_feature(kasa_id, &op);
+                CommandResult::Unknown(format!("camera answered HTTP {s}"))
+            }
+            Err(e) => {
+                let r = cam_error_result(&e);
+                if matches!(r, CommandResult::Unknown(_)) {
+                    self.forget_camera_feature(kasa_id, &op);
+                }
+                r
+            }
+        }
+    }
+
+    /// The camera-side twin of [`Self::forget_switch_state`].
+    fn forget_camera_feature(&mut self, kasa_id: &str, op: &CameraOp) {
+        if let (CameraOp::Set(f, _), Some(p)) = (op, self.devices.get_mut(kasa_id)) {
+            p.cam.features.remove(f);
         }
     }
 
@@ -1532,6 +1724,11 @@ fn iot_request(p: &Physical, role: &Role, cmd: &Command) -> Result<IotPlan, Comm
                 Role::Relay | Role::Dimmer | Role::Bulb { .. } | Role::Outlet { .. }
             ) =>
         {
+            if let Role::Outlet { child_id } = role
+                && !p.children.iter().any(|c| &c.id == child_id)
+            {
+                return Err(unavailable("the strip no longer reports this outlet"));
+            }
             let current = match role {
                 Role::Outlet { child_id } if p.observed => {
                     p.children.iter().find(|c| &c.id == child_id).map(|c| c.on)
@@ -1578,7 +1775,9 @@ fn iot_request(p: &Physical, role: &Role, cmd: &Command) -> Result<IotPlan, Comm
             Role::Bulb { color, temp } if color || temp => color_request(p, color, temp, args),
             _ => Err(invalid("color-light::set is not supported on this device")),
         },
-        (_, "set", Some(Ext::StatusLed)) if p.features.led => {
+        (_, "set", Some(Ext::StatusLed))
+            if p.features.led && matches!(role, Role::Relay | Role::Dimmer | Role::Strip) =>
+        {
             let on = args::bool(args, "on")
                 .ok_or_else(|| invalid("status-led::set requires `on: bool`"))?;
             Ok((iot::set_led_off(!on), Ext::StatusLed.key(), led_fields(on)))
@@ -1667,6 +1866,51 @@ fn remember_light(light: &mut iot::LightState, fields: &[KeyValue]) {
             _ => {}
         }
     }
+}
+
+/// One adopted device as stored: the sysinfo fields that rebuild it.
+fn record(id: &str, p: &Physical) -> Json {
+    let mut sys = json!({
+        "deviceId": id,
+        "alias": clip(&p.ident.name),
+        "is_color": u8::from(p.color),
+        "is_variable_color_temp": u8::from(p.temp),
+        "children": p.children.iter()
+            .map(|c| json!({"id": c.id, "alias": clip(&c.alias)}))
+            .collect::<Vec<_>>(),
+    });
+    for (key, value) in [
+        ("model", &p.ident.model),
+        ("sw_ver", &p.ident.firmware),
+        ("mac", &p.ident.mac),
+    ] {
+        if let Some(v) = value {
+            sys[key] = json!(clip(v));
+        }
+    }
+    if p.features.emeter {
+        sys["feature"] = json!("ENE");
+    }
+    if p.features.led {
+        sys["led_off"] = json!(0);
+    }
+    json!({ "id": id, "class": p.class.as_str(), "address": p.ident.address, "sysinfo": sys })
+}
+
+fn parse_record(e: &Json) -> Option<Discovered> {
+    Some(Discovered {
+        address: e.get("address")?.as_str()?.parse().ok()?,
+        id: e.get("id")?.as_str()?.to_string(),
+        class: discovery::KasaClass::parse(e.get("class")?.as_str()?),
+        sysinfo: SysInfo::parse(e.get("sysinfo")?),
+    })
+}
+
+/// `s` cut to [`MAX_STORED_NAME`] characters.
+fn clip(s: &str) -> &str {
+    s.char_indices()
+        .nth(MAX_STORED_NAME)
+        .map_or(s, |(i, _)| &s[..i])
 }
 
 /// Outlets as reported, minus malformed ones, capped at [`MAX_OUTLETS`].

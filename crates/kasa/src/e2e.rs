@@ -205,9 +205,9 @@ fn sweep_is_paced_and_finds_unicast_only_devices() {
 #[test]
 fn devices_persist_and_come_back_without_discovery() {
     let k = discovered(&[], vec![(PLUG, plug()), (STRIP, strip())]);
-    let stored = k.host.storage.get(STORAGE_KEY).cloned().unwrap();
+    assert!(k.host.storage.contains_key(STORAGE_KEY));
     let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
-    host.storage.insert(STORAGE_KEY.into(), stored);
+    host.storage = k.host.storage.clone();
     let mut net = FakeNet::default();
     net.iot.insert(PLUG, plug());
     let mut k2 = Kasa::new(host, net);
@@ -312,8 +312,14 @@ fn relay_commands_have_h5_outcomes() {
     );
     assert_eq!(bool_field(&r, "state"), Some(true));
     assert_eq!(k.net.iot[&PLUG].sysinfo["relay_state"], json!(1));
-    // The poll that follows doesn't re-publish what the result carried.
-    let n = k.host.events_for(&plug, cap::SWITCH).len();
+    // The confirmed change is an event (subscribers see it); the poll that
+    // follows doesn't publish it again.
+    let events = k.host.events_for(&plug, cap::SWITCH);
+    assert!(matches!(
+        events.last().and_then(|e| e.get("state")),
+        Some(Value::BoolVal(true))
+    ));
+    let n = events.len();
     k.net.advance(30_000);
     k.tick();
     assert_eq!(k.host.events_for(&plug, cap::SWITCH).len(), n);
@@ -843,14 +849,19 @@ fn queued_camera_toggles_run_in_order() {
 #[test]
 fn restored_outlets_need_a_read_before_toggle() {
     let k = discovered(&[], vec![(STRIP, strip())]);
-    let stored = k.host.storage.get(STORAGE_KEY).cloned().unwrap();
+    assert!(k.host.storage.contains_key(STORAGE_KEY));
     let mut host = FakeHost::with_config(&[("discovery", Value::BoolVal(false))]);
-    host.storage.insert(STORAGE_KEY.into(), stored);
+    host.storage = k.host.storage.clone();
     let mut net = FakeNet::default();
     net.iot.insert(STRIP, strip());
     let mut k = Kasa::new(host, net);
+    let before = format!("{:?}", k.host.storage);
     k.init();
-    assert_eq!(k.host.storage.len(), 1, "replay doesn't rewrite storage");
+    assert_eq!(
+        format!("{:?}", k.host.storage),
+        before,
+        "replay doesn't rewrite storage"
+    );
     let outlet = id(&k, "STRIP/outlet-00");
     let r = k.execute_command(&outlet, &cmd("t", cap::SWITCH, "toggle", vec![]));
     assert!(matches!(r, CommandResult::Err(Error::Unavailable(_))));
@@ -915,4 +926,224 @@ fn unconfirmed_writes_are_unknown() {
         ),
     );
     assert!(matches!(r, CommandResult::Unknown(_)), "{r:?}");
+}
+
+#[test]
+fn ambiguous_write_needs_a_read_before_toggle() {
+    let mut k = discovered(&[], vec![(PLUG, plug())]);
+    let plug = id(&k, "PLUG1");
+    // The write lands but its acknowledgement is unusable.
+    k.net.iot.get_mut(&PLUG).unwrap().err_code = i64::MIN;
+    let on = vec![kv("state", Value::BoolVal(true))];
+    let r = k.execute_command(&plug, &cmd("a", cap::SWITCH, "set", on));
+    assert!(matches!(r, CommandResult::Unknown(_)), "{r:?}");
+    k.net.iot.get_mut(&PLUG).unwrap().err_code = 0;
+    let r = k.execute_command(&plug, &cmd("b", cap::SWITCH, "toggle", vec![]));
+    assert!(
+        matches!(r, CommandResult::Err(Error::Unavailable(_))),
+        "{r:?}"
+    );
+    k.net.advance(30_000);
+    k.tick();
+    let r = k.execute_command(&plug, &cmd("c", cap::SWITCH, "toggle", vec![]));
+    assert_eq!(bool_field(&r, "state"), Some(false));
+}
+
+#[test]
+fn outlet_rejects_the_strip_led() {
+    let mut k = discovered(&[], vec![(STRIP, strip())]);
+    let outlet = id(&k, "STRIP/outlet-00");
+    let sent = k.net.tcp_count;
+    let r = k.execute_command(
+        &outlet,
+        &cmd(
+            "l",
+            &Ext::StatusLed.key(),
+            "set",
+            vec![kv("on", Value::BoolVal(true))],
+        ),
+    );
+    assert!(
+        matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
+        "{r:?}"
+    );
+    assert_eq!(k.net.tcp_count, sent);
+}
+
+#[test]
+fn unreadable_storage_holds_saves_until_read() {
+    let k = discovered(&[], vec![(PLUG, plug()), (STRIP, strip())]);
+    let stored = format!("{:?}", k.host.storage.get(STORAGE_KEY));
+    let mut host = FakeHost::default();
+    host.storage = k.host.storage.clone();
+    host.fail_storage_get = true;
+    let mut net = FakeNet::default();
+    // Only the plug is online.
+    net.iot.insert(PLUG, plug());
+    let mut k2 = Kasa::new(host, net);
+    k2.init();
+    for _ in 0..8 {
+        k2.tick();
+        k2.net.advance(500);
+    }
+    assert_eq!(
+        format!("{:?}", k2.host.storage.get(STORAGE_KEY)),
+        stored,
+        "not overwritten"
+    );
+    k2.host.fail_storage_get = false;
+    k2.tick();
+    assert!(
+        k2.device_id_of("STRIP").is_some(),
+        "restored after the read"
+    );
+}
+
+#[test]
+fn refused_idle_motion_is_retried() {
+    let mut cfg = creds();
+    cfg.push(("camera_motion", Value::BoolVal(true)));
+    let mut k = with_camera(&cfg, FakeCam::basic());
+    let cam_id = id(&k, "CAM1");
+    k.net.cams.get_mut(&CAM).unwrap().moving = true;
+    k.net.advance(1_000);
+    k.tick();
+    k.net.cams.get_mut(&CAM).unwrap().moving = false;
+    k.host.fail_publish = true;
+    for _ in 0..12 {
+        k.net.advance(1_000);
+        k.tick();
+    }
+    k.host.fail_publish = false;
+    k.net.advance(250);
+    k.tick();
+    let last = k.host.events_for(&cam_id, &Ext::Motion.key());
+    assert!(matches!(
+        last.last().and_then(|e| e.get("detected")),
+        Some(Value::BoolVal(false))
+    ));
+}
+
+#[test]
+fn malformed_ptz_arguments_are_rejected() {
+    let mut cam = FakeCam::basic();
+    cam.ptz = true;
+    let mut k = with_camera(&creds(), cam);
+    let cam_id = id(&k, "CAM1");
+    for bad in [
+        kv("speed", Value::StringVal("fast".into())),
+        kv("magnitude", Value::StringVal("big".into())),
+    ] {
+        let args = vec![kv("direction", Value::StringVal("left".into())), bad];
+        let r = k.execute_command(&cam_id, &cmd("p", &Ext::PanTilt.key(), "move", args));
+        assert!(
+            matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
+            "{r:?}"
+        );
+    }
+}
+
+#[test]
+fn slow_devices_spread_work_across_ticks() {
+    let mut k = with_camera(&creds(), FakeCam::basic());
+    let cam_id = id(&k, "CAM1");
+    for n in 0..6 {
+        k.execute_command(
+            &cam_id,
+            &cmd(
+                &format!("r{n}"),
+                &Ext::CameraControl.key(),
+                "reboot",
+                vec![],
+            ),
+        );
+    }
+    // Each camera call now takes a full 5 s timeout.
+    k.net.latency_ms = 5_000;
+    let before = k.host.completed.len();
+    k.tick();
+    let first = k.host.completed.len() - before;
+    assert!(
+        (1..6).contains(&first),
+        "budgeted: {first} of 6 in one tick"
+    );
+    for _ in 0..4 {
+        k.tick();
+    }
+    assert_eq!(
+        k.host.completed.len() - before,
+        6,
+        "the rest follow in order"
+    );
+    let ids: Vec<&str> = k.host.completed[before..]
+        .iter()
+        .map(|c| c.0.as_str())
+        .collect();
+    assert_eq!(ids, ["r0", "r1", "r2", "r3", "r4", "r5"]);
+}
+
+#[test]
+fn inventory_is_one_small_record_per_device() {
+    let mut s = strip();
+    s.sysinfo["alias"] = json!("x".repeat(500));
+    let mut k = discovered(&[], vec![(PLUG, plug()), (STRIP, s)]);
+    let mut keys: Vec<&String> = k.host.storage.keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["device/PLUG1", "device/STRIP", STORAGE_KEY]);
+    let Some(Value::JsonVal(rec)) = k.host.storage.get("device/STRIP") else {
+        panic!("no record");
+    };
+    assert!(rec.len() < 1_024, "names are clipped: {} bytes", rec.len());
+    // Unchanged records aren't written again.
+    k.host.storage.clear();
+    k.net.advance(60_000);
+    k.tick();
+    assert!(k.host.storage.is_empty(), "{:?}", k.host.storage.keys());
+}
+
+#[test]
+fn retired_outlets_are_removed_and_refused() {
+    let mut k = discovered(&[], vec![(STRIP, strip())]);
+    let old = id(&k, "STRIP/outlet-01");
+    k.net.iot.get_mut(&STRIP).unwrap().sysinfo["children"] = json!([ { "id": "00", "alias": "Monitor", "state": 1 }, { "id": "02", "alias": "Fan", "state": 0 } ]);
+    k.net.advance(60_000);
+    k.tick();
+    assert!(k.device_id_of("STRIP/outlet-02").is_some());
+    assert!(k.device_id_of("STRIP/outlet-01").is_none());
+    assert!(
+        k.host.devices.iter().all(|(i, _)| i != &old),
+        "removed on the host"
+    );
+    let on = vec![kv("state", Value::BoolVal(true))];
+    let r = k.execute_command(&old, &cmd("o", cap::SWITCH, "set", on));
+    assert!(matches!(r, CommandResult::Err(_)), "{r:?}");
+}
+
+#[test]
+fn refused_camera_children_are_registered_on_a_later_probe() {
+    let mut net = FakeNet {
+        now_ms: 1_000,
+        unix_ms: 1_700_000_000_000,
+        ..FakeNet::default()
+    };
+    net.iot.insert(CAM, camera_discovery());
+    net.cams.insert(CAM, FakeCam::basic());
+    let mut k = Kasa::new(FakeHost::with_config(&creds()), net);
+    k.init();
+    // The camera itself registers; its children are refused at first.
+    k.tick();
+    k.host.refuse_register = true;
+    for _ in 0..8 {
+        k.net.advance(1_000);
+        k.tick();
+    }
+    assert!(k.device_id_of("CAM1").is_some());
+    assert!(k.device_id_of("CAM1/siren").is_none());
+    k.host.refuse_register = false;
+    k.net.advance(120_000);
+    k.tick();
+    assert!(
+        k.device_id_of("CAM1/siren").is_some(),
+        "retried on the next probe"
+    );
 }
