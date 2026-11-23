@@ -1,5 +1,5 @@
 [alias]
-# cargo-machete is pinned to 0.9.2 because 0.10.1 uses a library
-# feature that is unstable on the pinned 1.95 toolchain and fails to
-# build; lift the pin once the toolchain moves past it.
-install-tools = "install --locked cargo-deny cargo-llvm-cov cargo-machete@0.9.2 cargo-nextest cargo-action-fmt"
+# Installs every cargo tool CI runs (and the developer flow expects on
+# $PATH) with `--locked`: cargo-deny, cargo-llvm-cov, cargo-machete,
+# cargo-nextest and cargo-action-fmt.
+install-tools = "install --locked cargo-deny cargo-llvm-cov cargo-machete cargo-nextest cargo-action-fmt"
