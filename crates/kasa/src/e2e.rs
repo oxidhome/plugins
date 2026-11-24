@@ -1455,6 +1455,25 @@ fn stale_address_survives_restart_and_mac_identifies_devices() {
 }
 
 #[test]
+fn mac_adopted_device_keeps_its_identity_when_discovery_adds_an_id() {
+    // The first discovery reply had only a MAC; a later one adds a deviceId.
+    let mut p = plug();
+    p.sysinfo.as_object_mut().unwrap().remove("deviceId");
+    let mut k = discovered(&[], vec![(PLUG, p)]);
+    let dev = id(&k, "AA:BB");
+    k.net.iot.get_mut(&PLUG).unwrap().sysinfo["deviceId"] = json!("PLUG1");
+    k.net.advance(300_000);
+    for _ in 0..8 {
+        k.tick();
+        k.net.advance(500);
+    }
+    assert!(k.device_id_of("PLUG1").is_none(), "registered twice");
+    let on = vec![kv("state", Value::BoolVal(true))];
+    let r = k.execute_command(&dev, &cmd("m", cap::SWITCH, "set", on));
+    assert_eq!(bool_field(&r, "state"), Some(true), "{r:?}");
+}
+
+#[test]
 fn mac_adopted_device_keeps_its_identity_when_sysinfo_adds_an_id() {
     // Discovery saw only a MAC; the TCP reply adds a deviceId.
     let mut p = plug();

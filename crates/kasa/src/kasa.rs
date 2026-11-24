@@ -472,6 +472,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// Adopts a discovered device: registers it on first sight, follows an
     /// address change, and applies the state in the reply.
     fn adopt(&mut self, d: &Discovered, live: bool) {
+        // A device adopted by MAC (no deviceId in its first reply) keeps
+        // that identity when a later reply adds a deviceId.
+        let by_mac = self.mac_adopted(d).map(|id| Discovered { id, ..d.clone() });
+        let d = by_mac.as_ref().unwrap_or(d);
         // Whoever answers here, the address no longer belongs to another
         // adopted device; checked before any admission rule.
         if live && !d.id.is_empty() {
@@ -598,6 +602,19 @@ impl<H: Host, N: Net> Kasa<H, N> {
 
     /// A live reply from `kasa_id` at `address`: any other device still
     /// recorded there has moved, so commands must not reach this one.
+    /// The id of the device adopted under `d`'s MAC, when `d` names a
+    /// different, unknown id.
+    fn mac_adopted(&self, d: &Discovered) -> Option<String> {
+        if self.devices.contains_key(&d.id) {
+            return None;
+        }
+        let mac = norm_mac(d.sysinfo.mac.as_deref()?);
+        if mac.is_empty() {
+            return None;
+        }
+        self.devices.keys().find(|id| norm_mac(id) == mac).cloned()
+    }
+
     fn claim_address(&mut self, kasa_id: &str, address: &str) {
         let mut moved = Vec::new();
         for (id, p) in &mut self.devices {

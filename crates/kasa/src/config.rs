@@ -3,7 +3,7 @@
 
 use std::net::Ipv4Addr;
 
-use crate::protocol::discovery::SweepTarget;
+use crate::protocol::discovery::{MAX_SWEEP_HOSTS, SweepTarget};
 use oxidhome_sdk::bindings::oxidhome::plugin::types::Value;
 
 /// Resolved configuration.
@@ -85,6 +85,20 @@ impl Config {
                     Err(e) => w.push(format!("config discovery_targets: {e}")),
                 }
             }
+        }
+        // Distinct hosts, counted only until one past the cap.
+        let mut seen = std::collections::HashSet::new();
+        for h in c.sweep.iter().flat_map(|t| t.hosts()) {
+            if seen.insert(h) && seen.len() > MAX_SWEEP_HOSTS {
+                break;
+            }
+        }
+        if seen.len() > MAX_SWEEP_HOSTS
+            && let Some(last) = crate::protocol::discovery::sweep_hosts(&c.sweep).last()
+        {
+            w.push(format!(
+                "config discovery_targets: more than {MAX_SWEEP_HOSTS} hosts; each sweep stops at {last}"
+            ));
         }
         c.camera_username =
             string(get("camera_username"), "camera_username", &mut w).filter(|s| !s.is_empty());
@@ -188,5 +202,17 @@ mod tests {
         ]);
         assert_eq!(bad.warnings.len(), 2);
         assert_eq!(bad.camera_password, None);
+        // Five /24s exceed one sweep's host cap: said once, at load.
+        let wide = load(&[(
+            "discovery_targets",
+            Value::StringVal("10.0.1.0/24,10.0.2.0/24,10.0.3.0/24,10.0.4.0/24,10.0.5.0/24".into()),
+        )]);
+        assert_eq!(wide.warnings.len(), 1, "{:?}", wide.warnings);
+        assert!(wide.warnings[0].contains("10.0.5.8"), "{:?}", wide.warnings);
+        let four = load(&[(
+            "discovery_targets",
+            Value::StringVal("10.0.1.0/24,10.0.2.0/24,10.0.3.0/24,10.0.4.0/24".into()),
+        )]);
+        assert_eq!(four.warnings, Vec::<String>::new());
     }
 }

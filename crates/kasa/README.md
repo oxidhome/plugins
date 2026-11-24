@@ -129,7 +129,7 @@ watchdog. Queued commands and due polls that don't fit wait for the next tick, i
 |---|---|---|---|
 | `discovery` | bool | `true` | Run UDP discovery. |
 | `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255. Has no effect until OxidHome slice 8.3: the host refuses broadcast, so list `discovery_targets`. |
-| `discovery_targets` | string | empty | Comma-separated /24-or-narrower networks or addresses to probe one by one, 3 ms apart. Some cameras (KC420WS) ignore broadcast but answer unicast. A single address works as a manual add. |
+| `discovery_targets` | string | empty | Comma-separated /24-or-narrower networks or addresses to probe one by one, 3 ms apart. Some cameras (KC420WS) ignore broadcast but answer unicast. A single address works as a manual add. A sweep covers at most 1,024 hosts; past that, the rest are skipped and a warning is logged at start. |
 | `discovery_interval_s` | int | 300 | Seconds between discovery runs; 0 runs it only at start; minimum 60. |
 | `poll_interval_s` | int | 30 | State poll interval per device; minimum 5. |
 | `camera_username` | string | empty | Kasa account email. |
@@ -173,10 +173,11 @@ reuse), nothing more is sent there until discovery finds the device again.
   can impersonate a camera and capture those credentials. Use a dedicated Kasa account,
   or isolate cameras on their own VLAN.
 - Discovery replies are unauthenticated UDP. The plugin follows a known device to a new
-  address when discovery sees it there (DHCP changes), so a LAN attacker who answers
-  probes with a camera's id receives that camera's credential encodings. Without TLS
-  pinning (gap 4) the plugin can't tell. Turn `discovery` off once cameras are adopted to
-  freeze their addresses.
+  address when discovery sees it there (DHCP changes). Once camera HTTPS lands (gap 4),
+  a LAN attacker who answers probes with a camera's id would receive that camera's
+  credential encodings, unless the certificate pin catches it; turn `discovery` off once
+  cameras are adopted to freeze their addresses. In this build no camera request is
+  sent, so no credential leaves the plugin.
 - The IOT protocol has no authentication. Anyone on the LAN can switch these devices,
   and the plugin adds no protection.
 - Every device reply is untrusted:

@@ -616,7 +616,13 @@ pub fn parse_time_reply(reply: &Value) -> Result<Option<DeviceDate>, IotError> {
     ) else {
         return Ok(None);
     };
-    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+    // History requests step back a year or two; a clock outside any
+    // plausible range is no date (and would overflow that arithmetic).
+    if !(2000..=2200).contains(&year)
+        || !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+    {
         return Ok(None);
     }
     Ok(Some(DeviceDate { year, month, day }))
@@ -1058,6 +1064,8 @@ mod tests {
         );
         let bad = json!({"time":{"get_time":{"year":2026,"month":2,"mday":30,"err_code":0}}});
         assert_eq!(parse_time_reply(&bad).unwrap(), None);
+        let min = json!({"time":{"get_time":{"year":i32::MIN,"month":3,"mday":1,"err_code":0}}});
+        assert_eq!(parse_time_reply(&min).unwrap(), None);
     }
 
     #[test]
