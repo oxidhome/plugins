@@ -38,8 +38,15 @@ unused_dependencies = "deny"
 # `wit-bindgen` is not a dependency here: the SDK brings it in through
 # `oxidhome-wit`, which pins it exactly, so plugins always compile
 # against the bindgen version the host was tested with.
-oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "bcbdb926622b757d734952e53d8c70b66550c0a3" }
-oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "bcbdb926622b757d734952e53d8c70b66550c0a3" }
+#
+# The SDK binds one plugin world per wasm build, chosen by feature:
+# `plugin` or `streaming-plugin`. Default features are off here so each
+# plugin names its world (`features = ["plugin"]` or
+# `["streaming-plugin"]`). Cargo unifies features across the packages of
+# one build, and a wasm build with both worlds fails, so wasm builds and
+# checks run per package (`-p <package>`), never `--workspace`.
+oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "a2d47d972b5243a268977eb50542a17745c5778b", default-features = false }
+oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "a2d47d972b5243a268977eb50542a17745c5778b" }
 # Test-only: parses `manifest.toml` the way the host does. Same version
 # as oxidhome/oxidhome so the lockfile keeps one copy.
 toml = { version = "1.1.2", default-features = false, features = ["parse", "serde", "std"] }

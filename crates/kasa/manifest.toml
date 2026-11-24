@@ -9,12 +9,9 @@ description = "TP-Link Kasa plugs, switches, dimmers, bulbs, power strips and ca
 source = "https://github.com/oxidhome/plugins/tree/main/crates/kasa"
 license = "MIT OR Apache-2.0"
 keywords = ["kasa", "tp-link", "plug", "bulb", "camera"]
-# Kasa needs `streaming-plugin` (sockets, HTTPS to cameras, host-media
-# pipes). The SDK only has `plugin` bindings and the host doesn't load
-# `streaming-plugin` yet (Phase 8), so this builds for `plugin` until then;
-# see README.md, "Platform gaps". The network rules below are what the
-# streaming build will need.
-world = "plugin"
+# Sockets (TCP/UDP 9999) and, later, HTTPS to cameras and host-media
+# pipes; see README.md, "Platform gaps", for what the host has today.
+world = "streaming-plugin"
 # Version of the pinned `oxidhome-sdk` crate (`cargo pkgid oxidhome-sdk`).
 sdk_version = "0.1.0"
 
@@ -24,15 +21,22 @@ sdk_version = "0.1.0"
 wasm = "oxidhome_kasa_plugin.wasm"
 # One instance owns the LAN's Kasa devices; two would fight over them.
 singleton = true
-# Polls, discovery and accepted camera commands advance on tick; the live
-# stream is pumped on tick too (no readiness callback yet).
-tick_interval_ms = 250
+# Polls, discovery sweeps and accepted camera commands advance on tick.
+# The host also ticks early (at least 100 ms after the previous tick)
+# when the discovery socket has replies waiting, so this is the cadence
+# for polls and the queue, not for draining replies.
+tick_interval_ms = 1000
 
 [capabilities]
 # Kasa devices only live on the local network. Discovery broadcasts and
 # sweeps UDP 9999; smart-home devices answer on TCP 9999; cameras serve
 # LINKIE2 control on 10443, the live stream and snapshots on 19443, and
 # two-way audio on 18443 (all HTTPS with a self-signed certificate).
+# The host refuses broadcast until OxidHome slice 8.3, and the plugin
+# doesn't send it before then (it sweeps `discovery_targets` instead);
+# the rule validates and stays so the grant doesn't change when it
+# lands. The HTTPS rules are for camera support (OxidHome #223 and
+# Phase 9); nothing uses them yet.
 network = [
   "udp://255.255.255.255:9999",
   "udp://10.0.0.0/8:9999",
@@ -78,7 +82,7 @@ description = "Find devices with the UDP probe on port 9999."
 [config.discovery_broadcast]
 type = "bool"
 default = true
-description = "Send the probe to 255.255.255.255. Turn off where broadcast doesn't reach the devices and list discovery_targets instead."
+description = "Send the probe to 255.255.255.255. The host refuses broadcast until OxidHome slice 8.3, so list discovery_targets meanwhile."
 
 [config.discovery_targets]
 type = "string"

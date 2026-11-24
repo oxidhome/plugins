@@ -10,7 +10,7 @@ needs from the host.
 | Plugin                         | Status | What it does                                                          |
 |--------------------------------|--------|-----------------------------------------------------------------------|
 | [template](crates/template)    | Ready  | A software switch to copy when starting a new plugin.                 |
-| [kasa](crates/kasa)            | Draft  | TP-Link Kasa plugs, switches, bulbs, strips and cameras; waits on OxidHome Phases 8–9. |
+| [kasa](crates/kasa)            | Draft  | TP-Link Kasa plugs, switches, bulbs, strips and cameras; cameras wait on HTTPS and media. |
 
 The SDK is not on crates.io yet, so plugins depend on it from git at a
 pinned oxidhome/oxidhome commit. See [CONTRIBUTING.md](CONTRIBUTING.md)

@@ -488,6 +488,8 @@ mod tests {
                 CapabilitySpec::AudioStream => "audio-stream".into(),
                 CapabilitySpec::Button => "button".into(),
                 CapabilitySpec::Extension(e) => format!("ext:{}", e.name),
+                // Not produced by this plugin.
+                other => format!("unexpected:{other:?}"),
             })
             .collect()
     }

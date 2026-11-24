@@ -1,16 +1,18 @@
 //! Live video: the camera's mixed multipart stream re-packetized as RTP and
 //! written into `host-media` plugin pipes.
 //!
-//! This is written against the WIT `media` interface as it stands. The
-//! SDK only has bindings for the `plugin` world, which doesn't include
-//! `media`, so [`mirror`] restates the subset of its types this plugin
-//! uses; they map one to one onto the WIT once the SDK exposes the
-//! `streaming-plugin` world. It cannot run until Phases 8–9, and several
-//! pieces have no WIT counterpart yet (see the README's "Platform gaps"):
-//! the pipeline returned by `setup-pipeline` and the writer from
-//! `open-pipe` aren't linked, a pipeline has one source while the camera
-//! muxes video and audio on its one connection, and the plugin is only
-//! scheduled on `tick`.
+//! This is written against the WIT `media` interface of the
+//! `streaming-plugin` world. [`mirror`] restates the subset of its types
+//! this plugin produces, with value semantics (`PartialEq`) the generated
+//! bindings don't have, and [`to_wit`] converts a pipeline for the
+//! `setup-pipeline` export. It can't run end to end until `OxidHome` ships
+//! camera HTTPS (#223) and media (Phase 9): the host's `host-media` is a
+//! placeholder that answers `unavailable`, and several pieces have no WIT
+//! counterpart yet (see the README's "Platform gaps"): the pipeline
+//! returned by `setup-pipeline` and the writer from `open-pipe` aren't
+//! linked, a pipeline has one source while the camera muxes video and
+//! audio on its one connection, and the plugin is told nothing when
+//! consumers come and go.
 
 pub use mirror::{
     ActivationPolicy, AudioCodec, ContainerFormat, MediaCodec, MediaPipeline, MediaSource,
@@ -18,7 +20,8 @@ pub use mirror::{
 };
 
 /// The subset of `oxidhome:plugin/media@0.1.0` this plugin produces, same
-/// names and shapes as the WIT.
+/// names and shapes as the WIT; [`to_wit`] maps them one
+/// to one.
 #[allow(missing_docs)]
 pub mod mirror {
     /// `pipe-format`.
@@ -101,6 +104,7 @@ use crate::protocol::multipart::{MultipartParser, PartKind, SpsPps, StreamError,
 use crate::protocol::rtp::{
     G711_CLOCK_HZ, G711Packetizer, H264_CLOCK_HZ, H264Packetizer, rtp_ticks,
 };
+use oxidhome_sdk::streaming::media as wit;
 
 /// Most bytes read from the stream per tick.
 pub const MAX_READ_PER_TICK: usize = 1024 * 1024;
@@ -166,6 +170,55 @@ pub fn camera_pipeline(kasa_id: &str) -> MediaPipeline {
         steps: vec![PipelineStep::Demux(ContainerFormat::Rtp)],
         sinks: vec![OutputSink::Webrtc, OutputSink::Rtsp(sink_name(kasa_id))],
         activation: ActivationPolicy::OnDemand,
+    }
+}
+
+/// `pipe` as the WIT `plugin-pipe-config`.
+#[must_use]
+pub fn to_wit_pipe_config(pipe: &PluginPipeConfig) -> wit::PluginPipeConfig {
+    wit::PluginPipeConfig {
+        format: match pipe.format {
+            PipeFormat::Rtp => wit::PipeFormat::Rtp,
+        },
+        codec: match pipe.codec {
+            MediaCodec::Video(VideoCodec::H264) => wit::MediaCodec::Video(wit::VideoCodec::H264),
+            MediaCodec::Audio(AudioCodec::PcmMulaw) => {
+                wit::MediaCodec::Audio(wit::AudioCodec::PcmMulaw)
+            }
+        },
+        clock_rate: pipe.clock_rate,
+        sample_rate: pipe.sample_rate,
+        channels: pipe.channels,
+    }
+}
+
+/// `pipeline` as the WIT `media-pipeline`, for the `setup-pipeline` export.
+#[must_use]
+pub fn to_wit(pipeline: &MediaPipeline) -> wit::MediaPipeline {
+    wit::MediaPipeline {
+        source: match &pipeline.source {
+            MediaSource::PluginPipe(p) => wit::MediaSource::PluginPipe(to_wit_pipe_config(p)),
+        },
+        steps: pipeline
+            .steps
+            .iter()
+            .map(|s| match s {
+                PipelineStep::Demux(ContainerFormat::Rtp) => {
+                    wit::PipelineStep::Demux(wit::ContainerFormat::Rtp)
+                }
+            })
+            .collect(),
+        sinks: pipeline
+            .sinks
+            .iter()
+            .map(|s| match s {
+                OutputSink::Webrtc => wit::OutputSink::Webrtc,
+                OutputSink::Rtsp(name) => wit::OutputSink::Rtsp(name.clone()),
+            })
+            .collect(),
+        activation: match pipeline.activation {
+            ActivationPolicy::OnDemand => wit::ActivationPolicy::OnDemand,
+        },
     }
 }
 
@@ -424,5 +477,37 @@ mod tests {
             audio_pipe_config().codec,
             MediaCodec::Audio(AudioCodec::PcmMulaw)
         ));
+    }
+
+    #[test]
+    fn pipeline_converts_to_the_wit_types() {
+        let p = to_wit(&camera_pipeline("CAM1"));
+        let wit::MediaSource::PluginPipe(src) = &p.source else {
+            panic!("expected a plugin pipe: {:?}", p.source);
+        };
+        assert!(matches!(src.format, wit::PipeFormat::Rtp));
+        assert!(matches!(
+            src.codec,
+            wit::MediaCodec::Video(wit::VideoCodec::H264)
+        ));
+        assert_eq!(src.clock_rate, Some(90_000));
+        assert!(matches!(
+            p.steps[..],
+            [wit::PipelineStep::Demux(wit::ContainerFormat::Rtp)]
+        ));
+        assert!(
+            matches!(&p.sinks[..], [wit::OutputSink::Webrtc, wit::OutputSink::Rtsp(n)] if *n == sink_name("CAM1"))
+        );
+        assert!(matches!(p.activation, wit::ActivationPolicy::OnDemand));
+
+        let audio = to_wit_pipe_config(&audio_pipe_config());
+        assert!(matches!(
+            audio.codec,
+            wit::MediaCodec::Audio(wit::AudioCodec::PcmMulaw)
+        ));
+        assert_eq!(
+            (audio.clock_rate, audio.sample_rate, audio.channels),
+            (Some(8_000), Some(8_000), Some(1))
+        );
     }
 }

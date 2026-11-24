@@ -1,16 +1,24 @@
-//! The component: the `plugin` world exports (through the SDK), the host
-//! imports behind [`Host`], and a [`Net`] over WASI.
+//! The component: the `streaming-plugin` world exports (through the SDK),
+//! the host imports behind [`Host`], and a [`Net`] over WASI.
 //!
-//! The plugin needs the `streaming-plugin` world (sockets, HTTPS,
-//! `host-media`), but the SDK only has bindings for `plugin`, and the
-//! host doesn't load `streaming-plugin` yet (Phase 8). Until then:
+//! What runs against `OxidHome` today (Phase 8.1):
 //!
-//! - TCP and UDP go through `std::net`, which wasi-libc implements on
-//!   `wasi:sockets`. The host links all of WASI p2, so the component
-//!   instantiates, but it grants no network, so the calls fail cleanly
-//!   (`err(unavailable)`, a logged discovery warning).
-//! - HTTPS (cameras) and `host-media` pipes answer "unavailable": the
-//!   `plugin` world has no `wasi:http` or `host-media` import.
+//! - TCP 9999 to plugs, switches, dimmers, bulbs and strips, and the UDP
+//!   9999 discovery sweep, through `std::net` on `wasi:sockets`. The host
+//!   checks every connect and send against the manifest's network rules.
+//!   The discovery socket stays open for the sweep's listening window, so
+//!   replies wake the plugin early instead of waiting for the next tick.
+//!
+//! What is stubbed, with the reason in the error:
+//!
+//! - The `255.255.255.255` probe: the host refuses broadcast until
+//!   `OxidHome` slice 8.3, so it isn't sent and discovery relies on the
+//!   `discovery_targets` sweep.
+//! - Camera HTTPS (LINKIE2, snapshots, the live stream, talkback): the
+//!   host's `wasi:http` serves plain `http://` only, and the cameras need
+//!   HTTPS with their self-signed certificates (`OxidHome` #223).
+//! - `host-media`: the import is wired, but the host answers
+//!   `unavailable` until Phase 9.
 //!
 //! The import calls only work inside a component; natively this module
 //! compiles (so clippy checks it) but is never called.
@@ -21,19 +29,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oxidhome_sdk::bindings::oxidhome::plugin::devices::{Command, CommandResult, DeviceInfo};
 use oxidhome_sdk::bindings::oxidhome::plugin::events::{Event, EventPayload, StateChange};
+use oxidhome_sdk::bindings::oxidhome::plugin::host_media;
 use oxidhome_sdk::bindings::oxidhome::plugin::logging::{self, Level};
 use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
-use oxidhome_sdk::{Plugin, host};
+use oxidhome_sdk::streaming::media::{MediaPipeline as WitPipeline, PipeWriter};
+use oxidhome_sdk::{Plugin, StreamingPlugin, host};
 
 use crate::kasa::Kasa;
-use crate::media::PluginPipeConfig;
+use crate::media::{self, PluginPipeConfig};
 use crate::platform::{ByteStream, Host, Net, NetError, PipeSink};
 use crate::protocol::http::{HttpRequest, HttpResponse};
 use crate::protocol::iot::{FrameDecoder, MAX_FRAME_BYTES};
 
-/// Why camera HTTPS and media pipes can't work in this build.
-const NEEDS_STREAMING_WORLD: &str = "needs the streaming-plugin world (wasi:http, host-media), \
-     which the SDK and host don't offer yet (OxidHome Phase 8)";
+/// Why camera HTTPS isn't available in this build.
+const NEEDS_HTTPS: &str = "needs HTTPS to self-signed LAN devices, which OxidHome doesn't \
+     offer yet (oxidhome/oxidhome#223)";
+
+/// Why the broadcast probe isn't sent.
+const NEEDS_BROADCAST: &str = "broadcast needs OxidHome slice 8.3; the host refuses it today";
 
 // ── Host ─────────────────────────────────────────────────────────────────
 
@@ -91,10 +104,29 @@ impl Host for WasiHost {
     fn log(&mut self, level: Level, message: &str) {
         logging::log(level, message);
     }
-    fn open_pipe(&mut self, _config: PluginPipeConfig) -> Result<Box<dyn PipeSink>, Error> {
-        Err(Error::Unavailable(format!(
-            "host-media {NEEDS_STREAMING_WORLD}"
-        )))
+    fn open_pipe(&mut self, config: PluginPipeConfig) -> Result<Box<dyn PipeSink>, Error> {
+        // `unavailable` from the host until OxidHome Phase 9.
+        let writer = host_media::open_pipe(media::to_wit_pipe_config(&config))?;
+        Ok(Box::new(WasiPipe(Some(writer))))
+    }
+}
+
+/// A `host-media` pipe writer.
+struct WasiPipe(Option<PipeWriter>);
+
+impl PipeSink for WasiPipe {
+    fn write(&mut self, data: &[u8]) -> Result<(), Error> {
+        let w = self
+            .0
+            .as_ref()
+            .ok_or_else(|| Error::Unavailable("pipe closed".into()))?;
+        w.write(data).map(|_| ())
+    }
+
+    fn close(&mut self) {
+        if let Some(w) = self.0.take() {
+            w.close();
+        }
     }
 }
 
@@ -216,12 +248,17 @@ impl Net for WasiNet {
             // wasi:sockets has no SO_BROADCAST; tolerate its absence.
             let _ = s.set_broadcast(true);
         }
+        // Non-blocking: replies are drained from `tick`, and the host
+        // ticks early when one is waiting.
         s.set_nonblocking(true).map_err(not_sent)?;
         self.udp = Some(s);
         Ok(())
     }
 
     fn udp_send(&mut self, to: SocketAddrV4, data: &[u8]) -> Result<(), NetError> {
+        if to.ip().is_broadcast() {
+            return Err(not_sent(NEEDS_BROADCAST));
+        }
         let s = self.udp.as_ref().ok_or_else(|| not_sent("socket closed"))?;
         s.send_to(data, to).map(|_| ()).map_err(not_sent)
     }
@@ -243,7 +280,7 @@ impl Net for WasiNet {
     }
 
     fn https(&mut self, _req: &HttpRequest, _timeout_ms: u64) -> Result<HttpResponse, NetError> {
-        Err(not_sent(format!("camera HTTPS {NEEDS_STREAMING_WORLD}")))
+        Err(not_sent(format!("camera HTTPS {NEEDS_HTTPS}")))
     }
 
     fn https_stream(
@@ -251,7 +288,7 @@ impl Net for WasiNet {
         _req: &HttpRequest,
         _timeout_ms: u64,
     ) -> Result<(HttpResponse, Box<dyn ByteStream>), NetError> {
-        Err(not_sent(format!("camera stream {NEEDS_STREAMING_WORLD}")))
+        Err(not_sent(format!("camera stream {NEEDS_HTTPS}")))
     }
 
     fn monotonic_ms(&self) -> u64 {
@@ -306,5 +343,13 @@ impl Plugin for KasaPlugin {
     }
 }
 
+impl StreamingPlugin for KasaPlugin {
+    /// Not called by the host yet (Phase 9). Opening the camera stream
+    /// fails until camera HTTPS lands (#223), so this answers that error.
+    fn setup_pipeline(&mut self, device: String) -> Result<WitPipeline, String> {
+        self.0.setup_pipeline(&device).map(|p| media::to_wit(&p))
+    }
+}
+
 #[cfg(target_family = "wasm")]
-oxidhome_sdk::plugin!(KasaPlugin);
+oxidhome_sdk::streaming_plugin!(KasaPlugin);

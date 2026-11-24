@@ -9,6 +9,7 @@ use crate::kasa::{Kasa, STORAGE_KEY};
 use crate::mapping::{Ext, cap};
 use crate::platform::NetError;
 use oxidhome_sdk::bindings::oxidhome::plugin::devices::{Command, CommandResult};
+use oxidhome_sdk::bindings::oxidhome::plugin::logging::Level;
 use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
 
 const PLUG: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 10);
@@ -200,6 +201,49 @@ fn sweep_is_paced_and_finds_unicast_only_devices() {
         "3 ms between probes within a tick"
     );
     assert!(k.device_id_of("PLUG1").is_some());
+}
+
+/// Before slice 8.3 the host refuses broadcast: the sweep still finds
+/// devices, and without one the plugin says what to configure, once.
+#[test]
+fn refused_broadcast_falls_back_to_the_sweep() {
+    let run = |cfg: &[(&str, Value)]| {
+        let mut net = FakeNet {
+            now_ms: 1_000,
+            refuse_broadcast: true,
+            ..FakeNet::default()
+        };
+        net.iot.insert(PLUG, plug());
+        let mut k = Kasa::new(FakeHost::with_config(cfg), net);
+        k.init();
+        for _ in 0..8 {
+            k.tick();
+            k.net.advance(500);
+        }
+        k
+    };
+    let warnings = |k: &Kasa<FakeHost, FakeNet>| {
+        k.host
+            .logs
+            .iter()
+            .filter(|(l, m)| matches!(l, Level::Warn) && m.contains("discovery_targets"))
+            .count()
+    };
+
+    let swept = run(&[("discovery_targets", Value::StringVal("192.168.1.10".into()))]);
+    assert!(swept.device_id_of("PLUG1").is_some());
+    assert_eq!(warnings(&swept), 0);
+
+    let mut alone = run(&[("discovery_interval_s", Value::IntVal(60))]);
+    assert!(alone.device_id_of("PLUG1").is_none());
+    assert_eq!(warnings(&alone), 1);
+    // The next run doesn't repeat the warning.
+    alone.net.advance(60_000);
+    for _ in 0..8 {
+        alone.tick();
+        alone.net.advance(500);
+    }
+    assert_eq!(warnings(&alone), 1);
 }
 
 #[test]

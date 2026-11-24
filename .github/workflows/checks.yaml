@@ -110,10 +110,13 @@ jobs:
         with:
           toolchain: ${{ needs.RustMeta.outputs.rust-version }}
           target: wasm32-wasip2
-      - run: cargo check --workspace --all-features --all-targets --locked --verbose
+      # One package per run: plugins pick their SDK world by feature, and
+      # a `--workspace` build would unify both worlds into every plugin
+      # (see .github/each-package.sh).
+      - run: .github/each-package.sh check --all-features --all-targets --locked --verbose
       # `--lib` on wasm: a plugin's tests run natively, and test-only
       # dependencies (e.g. oxidhome-test-host) don't build for wasm32-wasip2.
-      - run: cargo check --workspace --target wasm32-wasip2 --all-features --lib --locked --verbose
+      - run: .github/each-package.sh check --target wasm32-wasip2 --all-features --lib --locked --verbose
   Build:
     name: Build
     needs:
@@ -139,8 +142,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       - run: cargo install-tools
-      - run: cargo clippy --all-features --all-targets --verbose -- --deny warnings
-      - run: cargo clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
+      # Per package, as in `MSRV`.
+      - run: .github/each-package.sh clippy --all-features --all-targets --verbose -- --deny warnings
+      - run: .github/each-package.sh clippy --all-features --all-targets --quiet --message-format=json | cargo-action-fmt
         if: failure()
   WasmClippy:
     name: Check Rust code with Clippy for wasm32-wasip2
@@ -151,8 +155,9 @@ jobs:
       - run: cargo install-tools
       # `--lib`: the component is what ships for wasm32-wasip2; tests and
       # their dependencies are native-only (see `MSRV`).
-      - run: cargo clippy --target wasm32-wasip2 --all-features --lib --verbose -- --deny warnings
-      - run: cargo clippy --target wasm32-wasip2 --all-features --lib --quiet --message-format=json | cargo-action-fmt
+      # Per package, as in `MSRV`.
+      - run: .github/each-package.sh clippy --target wasm32-wasip2 --all-features --lib --verbose -- --deny warnings
+      - run: .github/each-package.sh clippy --target wasm32-wasip2 --all-features --lib --quiet --message-format=json | cargo-action-fmt
         if: failure()
   Docs:
     name: Check rustdoc
@@ -165,8 +170,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-      - run: cargo doc --workspace --all-features --no-deps --verbose
-      - run: cargo doc --workspace --target wasm32-wasip2 --all-features --no-deps --verbose
+      # Per package, as in `MSRV`.
+      - run: .github/each-package.sh doc --all-features --no-deps --verbose
+      - run: .github/each-package.sh doc --target wasm32-wasip2 --all-features --no-deps --verbose
   DocLinks:
     name: Check markdown links
     runs-on: ubuntu-latest

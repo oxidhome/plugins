@@ -4,7 +4,9 @@
 //! - [`Host`]: the `OxidHome` host imports the plugin uses (devices,
 //!   events, config, storage, blob-store, logging, media).
 //! - [`Net`]: sockets, HTTPS, clocks and randomness. The real
-//!   implementation needs the `streaming-plugin` world (Phase 8).
+//!   implementation ([`crate::wasm::WasiNet`]) runs TCP and the UDP sweep
+//!   over `wasi:sockets` in the `streaming-plugin` world; broadcast waits
+//!   on `OxidHome` slice 8.3 and camera HTTPS on oxidhome/oxidhome#223.
 //!
 //! Errors: [`Host`] methods return the host's `error` unchanged; [`Net`]
 //! methods return [`NetError`], split by whether anything was sent.
@@ -66,7 +68,8 @@ pub trait PipeSink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetError {
     /// Failed before anything was written (connect refused, unreachable,
-    /// TLS handshake, DNS, no socket support in this host).
+    /// TLS handshake, DNS, refused by the host's network rules, or not
+    /// supported by this host yet).
     NotSent(String),
     /// Failed after the request went out (timeout, reset, short reply).
     Sent(String),

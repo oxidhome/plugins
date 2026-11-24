@@ -9,22 +9,28 @@ password, because they use them to authenticate local requests.
 
 This is a port of the [Scrypted Kasa plugin](https://github.com/sv-tools/scrypted-kasa-plugin).
 
-> **Status: blocked on Phases 8 and 9.** Kasa needs the `streaming-plugin` world
-> (sockets, HTTPS, `host-media`). The SDK only has bindings for the `plugin` world, the
-> host doesn't load `streaming-plugin` yet (Phase 8), and there is no media pipeline
-> behind `host-media` yet (Phase 9). So the component builds for `plugin` through
-> `oxidhome-sdk`, with sockets, HTTPS and media behind the `Net` and `Host` traits.
-> Everything below the host boundary is implemented and tested natively against fakes:
+> **Status: plugs, switches, dimmers, bulbs and strips work; cameras wait on HTTPS and
+> media.** The component targets the `streaming-plugin` world (OxidHome Phase 8.1,
+> `oxidhome` `a2d47d9`):
 >
-> - the protocol core
-> - discovery
-> - polling
-> - commands with H5 outcomes
-> - camera controls
-> - stream re-packetization into RTP
+> - **Works:** TCP 9999 to smart-home devices (polling, commands with H5 outcomes) and
+>   the paced UDP unicast sweep of `discovery_targets`, through `std::net` on
+>   `wasi:sockets`, checked by the host against the manifest's network rules. Discovery
+>   replies wake the plugin early, so the 1 s tick is the cadence for polls and queued
+>   commands only.
+> - **Waits on slice 8.3:** the `255.255.255.255` broadcast probe. The host refuses
+>   broadcast, so the plugin doesn't send it and finds devices only through
+>   `discovery_targets`; with none set it logs a warning once.
+> - **Waits on oxidhome/oxidhome#223:** camera control, snapshots, the live stream and
+>   talkback (all HTTPS to self-signed cameras). Camera commands complete with
+>   `err(unavailable)` naming #223.
+> - **Waits on Phase 9:** media. `setup-pipeline` is exported and `host-media` pipes are
+>   wired, but the host doesn't call the export and its `host-media` answers
+>   `unavailable`.
 >
-> The component builds for `wasm32-wasip2`. [Platform gaps](#platform-gaps) lists what
-> the SDK, WIT and host still need.
+> Everything below the host boundary is also tested natively against fakes: the protocol
+> core, discovery, polling, commands, camera controls and stream re-packetization into
+> RTP. [Platform gaps](#platform-gaps) lists what is still missing.
 
 ## Supported devices
 
@@ -100,8 +106,8 @@ TCP exchange:
 | The device returned `err_code` ≠ 0 | `err(unavailable)`, or `err(invalid-argument)` for `-3` |
 | The request was sent but no usable reply came back | `unknown`; the cached on/off is dropped, so a `toggle` waits for the next read |
 
-**Camera commands** first answer `accepted`. On the next `tick` the plugin makes the call
-and reports the result with `complete-command`:
+**Camera commands** first answer `accepted`. On the next `tick` (within about a second)
+the plugin makes the call and reports the result with `complete-command`:
 
 | What happened | Result |
 |---|---|
@@ -120,7 +126,7 @@ watchdog. Queued commands and due polls that don't fit wait for the next tick, i
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `discovery` | bool | `true` | Run UDP discovery. |
-| `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255. |
+| `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255. Has no effect until OxidHome slice 8.3: the host refuses broadcast, so list `discovery_targets`. |
 | `discovery_targets` | string | empty | Comma-separated /24-or-narrower networks or addresses to probe one by one, 3 ms apart. Some cameras (KC420WS) ignore broadcast but answer unicast. A single address works as a manual add. |
 | `discovery_interval_s` | int | 300 | Seconds between discovery runs; 0 runs it only at start; minimum 60. |
 | `poll_interval_s` | int | 30 | State poll interval per device; minimum 5. |
@@ -139,12 +145,15 @@ reuse), nothing more is sent there until discovery finds the device again.
 ## Required capabilities
 
 - **Network:** private ranges only (10/8, 172.16/12, 192.168/16) on the Kasa ports.
-  - UDP 9999: discovery, including the 255.255.255.255 broadcast.
+  - UDP 9999: discovery, including the 255.255.255.255 broadcast (refused by the host
+    until slice 8.3; the rule is declared now so the grant doesn't change then).
   - TCP 9999: plugs, switches and bulbs.
   - HTTPS 10443: camera control.
   - HTTPS 19443: stream and snapshots.
   - HTTPS 18443: two-way audio. The talkback framing is implemented, but nothing drives
     it yet.
+
+  The HTTPS rules are unused until oxidhome/oxidhome#223.
 - **Devices:** the capability keys in the mapping table.
 - **Storage:** 512 KB, for up to 256 devices at a few hundred bytes to ~2 KB each.
 - **Blobs:** 16 MB, enough for one snapshot per camera, overwritten in place.
@@ -179,48 +188,34 @@ reuse), nothing more is sent there until discovery finds the device again.
 
 ## Platform gaps
 
-These are what the SDK, the current WIT (`oxidhome:plugin@0.1.0` at oxidhome `bcbdb92`)
+These are what the SDK, the current WIT (`oxidhome:plugin@0.1.0` at oxidhome `a2d47d9`)
 and the host lack for this plugin to run end to end. The plugin doesn't work around any
-of them by changing the WIT.
+of them by changing the WIT. Numbers are kept stable so code comments can refer to them.
 
 ### Sockets and HTTPS (Phase 8)
 
-0. **No `streaming-plugin` bindings in the SDK.** `oxidhome-sdk` generates and exports
-   only the `plugin` world, and `oxidhome-wit`'s `streaming-plugin` module keeps its
-   export macro private, so a plugin can't export `streaming.setup-pipeline` or import
-   `wasi:http` and `host-media` without its own bindgen. This build therefore targets
-   `plugin`:
-   - TCP and UDP use `std::net`, which works wherever the host grants WASI sockets.
-   - Camera HTTPS and media pipes return `unavailable`.
-   - `Kasa::setup_pipeline` exists and is tested, but isn't exported.
-   - The media types are mirrored in `media::mirror` until the SDK exposes them.
-
-   When the SDK gains the world, switch `manifest.toml` to `world = "streaming-plugin"`,
-   export `setup-pipeline`, and implement `Net::https`, `Net::https_stream` and
-   `Host::open_pipe` over `wasi:http` and `host-media`.
-1. **The world can't create sockets.** `streaming-plugin` imports `wasi:sockets/tcp` and
-   `udp`, but not `tcp-create-socket`, `udp-create-socket`, `instance-network` or
-   `ip-name-lookup`, so a guest can't open a socket. The component uses `std::net`,
-   which pulls those imports in; `wasm-tools component wit` shows them. The host links
-   all of WASI p2 today, so the component instantiates, but its `WasiCtx` grants no
-   network, so the calls fail. Phase 8 needs to put the create-socket interfaces in the
-   world and gate them on `[capabilities] network`.
-2. **No broadcast.** wasi:sockets 0.2 has no `SO_BROADCAST`, so the
-   `255.255.255.255:9999` probe depends on the host allowing it. Unicast sweeps
-   (`discovery_targets`) are the fallback.
-3. **No interface enumeration.** The Scrypted plugin sweeps every connected /24. WASI
-   can't list interfaces, so sweep targets come from config.
-4. **No self-signed TLS.** `wasi:http` always verifies certificates, and so does the
-   media source's `transport-security::tls`. Every camera port is self-signed. The host
-   needs a per-device "trust on first use" pin, or a manifest-scoped "self-signed OK for
-   private ranges". Network rules can't express either today.
-5. **`credential-ref` sends the password as-is.** A host-run source on 19443 would need
-   the base64-encoded password, and talk on 18443 needs the md5 hex. The plugin computes
-   both itself and sends them in its own requests, so the password does reach plugin
-   memory.
-6. **Pumping is tick-driven.** There is no readiness callback on sockets or streams, so
-   the live stream and discovery replies are drained every `tick` (250 ms), with up to
-   1 MiB per tick per stream. The 3 ms discovery pacing blocks inside a tick, for about
+0. **Closed (8.1).** The SDK has the `streaming-plugin` world: the component exports
+   `setup-pipeline` through `streaming_plugin!` and imports `wasi:sockets`, `wasi:http`
+   and `host-media`.
+1. **Closed (8.1).** The world creates sockets, gated on `[capabilities] network`.
+2. **No broadcast (slice 8.3).** The host refuses broadcast and multicast sends, so the
+   plugin doesn't send the `255.255.255.255:9999` probe. Unicast sweeps
+   (`discovery_targets`) are the fallback, and the only way to find devices until then.
+3. **No interface enumeration (slice 8.3).** The Scrypted plugin sweeps every connected
+   /24. WASI can't list interfaces, so sweep targets come from config.
+4. **No HTTPS to self-signed devices (oxidhome/oxidhome#223).** The host's `wasi:http`
+   serves plain `http://` only, and every camera port is HTTPS with a self-signed
+   certificate. #223 adds HTTPS with trust-on-first-use pinning for LAN devices and an
+   SDK blocking HTTP client; `Net::https` and `Net::https_stream` move onto it then.
+   Until then camera control, snapshots, the stream and talkback answer
+   `err(unavailable)`.
+5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
+   would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
+   plugin computes both itself and sends them in its own requests, so the password does
+   reach plugin memory.
+6. **Closed (8.1).** The host ticks the plugin early when a held socket is readable, so
+   discovery replies no longer wait for the next tick. Polls and queued camera commands
+   still run on the 1 s tick. The 3 ms discovery pacing blocks inside a tick, for about
    190 ms per 64 probes.
 
 ### Media (Phase 9)
@@ -240,8 +235,8 @@ of them by changing the WIT.
 10. **`pipe-writer.write` has no timestamps.** The plugin works around it by writing
     pre-framed RTP from its own packetizer (FU-A, MTU 1400; PCMU 160-sample packets).
     It stamps arrival time, as the Scrypted plugin does. Because the stream is drained
-    per tick, frames that arrive within one tick share a timestamp; a readiness callback
-    (gap 6) would fix that.
+    per tick, frames that arrive within one tick share a timestamp. Socket wakeups
+    (gap 6) don't cover `wasi:http` bodies yet.
 11. **No outbound audio.** There's no way to receive talkback audio from a consumer (a
     WebRTC client). The 18443 framing is implemented and tested (`protocol::talk`), but
     nothing can feed it.
@@ -274,8 +269,9 @@ of them by changing the WIT.
 - Cache SPS/PPS per camera for a fast stream start, once the pipeline can take it.
 - Energy meters on individual strip outlets (HS300). Needs `context.child_ids` on the
   `emeter` calls.
-- Move to the `streaming-plugin` world once the SDK and host support it (gap 0).
-- Integration tests against the OxidHome test host, once it links `streaming-plugin`.
+- Camera HTTPS over the #223 client (gap 4).
+- Integration tests against `oxidhome-test-host`, which loads `streaming-plugin`
+  components.
 - Review round 3 follow-ups:
   - bound the camera command queue by the host's pending-command limit (64, 5 min expiry)
     and check a job's age before sending it;
@@ -292,7 +288,7 @@ of them by changing the WIT.
 
 ```sh
 cargo test -p oxidhome-kasa-plugin                     # protocol + end-to-end over fakes
-cargo clippy -p oxidhome-kasa-plugin --target wasm32-wasip2 --lib -- -D warnings
+cargo clippy -p oxidhome-kasa-plugin --target wasm32-wasip2 --all-features --lib -- -D warnings
 cargo build -p oxidhome-kasa-plugin --target wasm32-wasip2 --release
 ```
 
@@ -304,7 +300,7 @@ Layout:
 | `src/kasa.rs` | Plugin logic over `Host` + `Net`. |
 | `src/mapping.rs` | Device and capability mapping. |
 | `src/media.rs` | Stream session: multipart → RTP → pipes. |
-| `src/wasm.rs` | Component exports through `oxidhome-sdk`, and `Host`/`Net` over the SDK host calls and `std::net`. |
+| `src/wasm.rs` | Component exports through `oxidhome-sdk` (`streaming_plugin!`), and `Host`/`Net` over the SDK host calls, `host-media` and `std::net`. |
 | `src/fake.rs`, `src/e2e.rs` | Simulated devices and end-to-end tests. |
 | `tests/manifest.rs` | Validates `manifest.toml` with the host's `oxidhome-manifest`. |
 

@@ -18,7 +18,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 base64.workspace = true
 md-5.workspace = true
-oxidhome-sdk.workspace = true
+# The `streaming-plugin` world: WASI sockets and outgoing HTTP, gated
+# by the manifest's `[capabilities] network` rules.
+oxidhome-sdk = { workspace = true, features = ["streaming-plugin"] }
 serde_json.workspace = true
 
 [dev-dependencies]

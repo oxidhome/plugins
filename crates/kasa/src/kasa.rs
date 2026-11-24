@@ -51,8 +51,9 @@ pub fn record_key(kasa_id: &str) -> String {
     format!("device/{kasa_id}")
 }
 /// Smart-home polls per tick, so one tick stays short when many devices
-/// are due together.
-pub const MAX_IOT_POLLS_PER_TICK: usize = 4;
+/// are due together. With the manifest's 1 s tick that is 16 polls a
+/// second, enough for [`MAX_DEVICES`] at the 30 s default interval.
+pub const MAX_IOT_POLLS_PER_TICK: usize = 16;
 /// Network time one tick may start new work in. The host's watchdog kills
 /// a tick at 30 s; work begun before the budget runs out can still take
 /// one full timeout (10 s for a snapshot), and a camera poll makes up to
@@ -222,6 +223,8 @@ pub struct Kasa<H: Host, N: Net> {
     /// The index as last stored.
     saved_index: Option<String>,
     warned_full: bool,
+    /// Warned that broadcast failed with no sweep to fall back on.
+    warned_no_broadcast: bool,
 }
 
 fn unavailable(msg: impl Into<String>) -> CommandResult {
@@ -254,6 +257,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
             saved: HashMap::new(),
             saved_index: None,
             warned_full: false,
+            warned_no_broadcast: false,
         }
     }
 
@@ -1252,7 +1256,20 @@ impl<H: Host, N: Net> Kasa<H, N> {
             if self.cfg.broadcast {
                 let to = SocketAddrV4::new(Ipv4Addr::BROADCAST, discovery::DISCOVERY_PORT);
                 if let Err(e) = self.net.udp_send(to, &probe) {
-                    self.log(Level::Debug, &format!("discovery broadcast: {e}"));
+                    // The unicast sweep below is the fallback; with none
+                    // configured, discovery can't find anything.
+                    if self.cfg.sweep.is_empty()
+                        && !std::mem::replace(&mut self.warned_no_broadcast, true)
+                    {
+                        self.log(
+                            Level::Warn,
+                            &format!(
+                                "discovery broadcast: {e}; set discovery_targets to find devices"
+                            ),
+                        );
+                    } else {
+                        self.log(Level::Debug, &format!("discovery broadcast: {e}"));
+                    }
                 }
             }
             self.sweep = Some(Sweep {

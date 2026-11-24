@@ -185,7 +185,7 @@ dependencies = [
 [[package]]
 name = "oxidhome-manifest"
 version = "0.1.0"
-source = "git+https://github.com/oxidhome/oxidhome?rev=bcbdb926622b757d734952e53d8c70b66550c0a3#bcbdb926622b757d734952e53d8c70b66550c0a3"
+source = "git+https://github.com/oxidhome/oxidhome?rev=a2d47d972b5243a268977eb50542a17745c5778b#a2d47d972b5243a268977eb50542a17745c5778b"
 dependencies = [
  "ipnet",
  "semver",
@@ -197,7 +197,7 @@ dependencies = [
 [[package]]
 name = "oxidhome-sdk"
 version = "0.1.0"
-source = "git+https://github.com/oxidhome/oxidhome?rev=bcbdb926622b757d734952e53d8c70b66550c0a3#bcbdb926622b757d734952e53d8c70b66550c0a3"
+source = "git+https://github.com/oxidhome/oxidhome?rev=a2d47d972b5243a268977eb50542a17745c5778b#a2d47d972b5243a268977eb50542a17745c5778b"
 dependencies = [
  "oxidhome-wit",
  "serde",
@@ -218,7 +218,7 @@ dependencies = [
 [[package]]
 name = "oxidhome-wit"
 version = "0.1.0"
-source = "git+https://github.com/oxidhome/oxidhome?rev=bcbdb926622b757d734952e53d8c70b66550c0a3#bcbdb926622b757d734952e53d8c70b66550c0a3"
+source = "git+https://github.com/oxidhome/oxidhome?rev=a2d47d972b5243a268977eb50542a17745c5778b#a2d47d972b5243a268977eb50542a17745c5778b"
 dependencies = [
  "wit-bindgen",
 ]

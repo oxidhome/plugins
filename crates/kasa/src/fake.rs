@@ -391,6 +391,8 @@ pub struct FakeNet {
     pub cams: HashMap<Ipv4Addr, FakeCam>,
     /// Discovery replies only to unicast (simulates a host without broadcast).
     pub udp_open: bool,
+    /// Refuse broadcast sends, as the host does before slice 8.3.
+    pub refuse_broadcast: bool,
     pub udp_sent: Vec<SocketAddrV4>,
     pub udp_inbox: VecDeque<(Ipv4Addr, Vec<u8>)>,
     pub now_ms: u64,
@@ -444,6 +446,9 @@ impl Net for FakeNet {
         assert!(self.udp_open, "send on a closed socket");
         assert_eq!(to.port(), 9999);
         assert_eq!(cipher::decrypt(data), br#"{"system":{"get_sysinfo":{}}}"#);
+        if self.refuse_broadcast && to.ip().is_broadcast() {
+            return Err(NetError::NotSent("permission denied".into()));
+        }
         self.udp_sent.push(to);
         if to.ip().is_broadcast() {
             let ips: Vec<Ipv4Addr> = self.iot.keys().copied().collect();
