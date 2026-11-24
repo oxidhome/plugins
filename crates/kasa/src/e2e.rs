@@ -252,32 +252,49 @@ fn refused_broadcast_falls_back_to_the_sweep() {
     assert_eq!(off.net.udp_sent, []);
 }
 
-/// Without the broadcast only swept hosts were asked, so a reply from
-/// anyone else is ignored rather than adopted.
+/// Without the broadcast only hosts a probe went out to were asked, so a
+/// reply from anyone else (outside the targets, not probed yet, or whose
+/// probe failed) is ignored rather than adopted.
 #[test]
 fn unsolicited_replies_are_ignored_without_broadcast() {
+    let evil = |id: &str| {
+        let reply = json!({ "system": { "get_sysinfo": {
+            "type": "IOT.SMARTPLUGSWITCH", "model": "HS103(US)", "alias": "Intruder",
+            "deviceId": id, "mac": "EE:EE", "relay_state": 0 } } });
+        crate::protocol::cipher::encrypt(reply.to_string().as_bytes())
+    };
     let mut net = FakeNet {
         now_ms: 1_000,
         refuse_broadcast: true,
+        refuse_to: vec![Ipv4Addr::new(192, 168, 1, 2)],
         ..FakeNet::default()
     };
     net.iot.insert(PLUG, plug());
-    let reply = json!({ "system": { "get_sysinfo": {
-        "type": "IOT.SMARTPLUGSWITCH", "model": "HS103(US)", "alias": "Intruder",
-        "deviceId": "EVIL1", "mac": "EE:EE", "relay_state": 0 } } });
-    net.udp_inbox.push_back((
-        BULB,
-        crate::protocol::cipher::encrypt(reply.to_string().as_bytes()),
-    ));
-    let cfg = [("discovery_targets", Value::StringVal("192.168.1.10".into()))];
+    // Outside the targets.
+    net.udp_inbox
+        .push_back((Ipv4Addr::new(192, 168, 2, 1), evil("EVIL1")));
+    // A target in a later batch (64 probes per tick), not probed yet.
+    net.udp_inbox
+        .push_back((Ipv4Addr::new(192, 168, 1, 200), evil("EVIL2")));
+    let cfg = [(
+        "discovery_targets",
+        Value::StringVal("192.168.1.0/24".into()),
+    )];
     let mut k = Kasa::new(FakeHost::with_config(&cfg), net);
     k.init();
+    k.tick();
+    // A target whose probe the host refused.
+    k.net
+        .udp_inbox
+        .push_back((Ipv4Addr::new(192, 168, 1, 2), evil("EVIL3")));
     for _ in 0..8 {
         k.tick();
         k.net.advance(500);
     }
     assert!(k.device_id_of("PLUG1").is_some());
-    assert!(k.device_id_of("EVIL1").is_none());
+    for id in ["EVIL1", "EVIL2", "EVIL3"] {
+        assert!(k.device_id_of(id).is_none(), "{id} adopted");
+    }
 }
 
 #[test]
