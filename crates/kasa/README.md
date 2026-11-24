@@ -108,8 +108,8 @@ TCP exchange:
 | The device returned `err_code` ≠ 0 | `err(unavailable)`, or `err(invalid-argument)` for `-3` |
 | The request was sent but no usable reply came back | `unknown`; the cached on/off is dropped, so a `toggle` waits for the next read |
 
-**Camera commands** first answer `accepted`. On the next `tick` (within about a second)
-the plugin makes the call and reports the result with `complete-command`:
+**Camera commands** first answer `accepted`. On the next `tick` (within about a second
+when idle; later while another call holds the instance) the plugin makes the call and reports the result with `complete-command`:
 
 | What happened | Result |
 |---|---|

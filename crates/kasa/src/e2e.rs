@@ -1473,6 +1473,29 @@ fn mac_adopted_device_keeps_its_identity_when_discovery_adds_an_id() {
     assert_eq!(bool_field(&r, "state"), Some(true), "{r:?}");
 }
 
+/// The MAC fallback only matches a device adopted under its MAC, not one
+/// whose deviceId merely looks like that MAC.
+#[test]
+fn mac_fallback_does_not_merge_distinct_devices() {
+    let mut first = plug();
+    first.sysinfo["deviceId"] = json!("plug-001122334455");
+    let mut second = plug();
+    second.sysinfo["deviceId"] = json!("NEW1");
+    second.sysinfo["mac"] = json!("00:11:22:33:44:55");
+    let mut k = discovered(&[], vec![(PLUG, first)]);
+    assert!(k.device_id_of("plug-001122334455").is_some());
+    k.net.iot.insert(BULB, second);
+    k.net.advance(300_000);
+    for _ in 0..8 {
+        k.tick();
+        k.net.advance(500);
+    }
+    assert!(
+        k.device_id_of("NEW1").is_some(),
+        "merged into the first plug"
+    );
+}
+
 #[test]
 fn mac_adopted_device_keeps_its_identity_when_sysinfo_adds_an_id() {
     // Discovery saw only a MAC; the TCP reply adds a deviceId.

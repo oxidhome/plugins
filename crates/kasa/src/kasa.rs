@@ -473,8 +473,12 @@ impl<H: Host, N: Net> Kasa<H, N> {
     /// address change, and applies the state in the reply.
     fn adopt(&mut self, d: &Discovered, live: bool) {
         // A device adopted by MAC (no deviceId in its first reply) keeps
-        // that identity when a later reply adds a deviceId.
-        let by_mac = self.mac_adopted(d).map(|id| Discovered { id, ..d.clone() });
+        // that identity when a later live reply adds a deviceId. Stored
+        // records replay as they are: their address isn't live.
+        let by_mac = live
+            .then(|| self.mac_adopted(d))
+            .flatten()
+            .map(|id| Discovered { id, ..d.clone() });
         let d = by_mac.as_ref().unwrap_or(d);
         // Whoever answers here, the address no longer belongs to another
         // adopted device; checked before any admission rule.
@@ -600,10 +604,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
     }
 
-    /// A live reply from `kasa_id` at `address`: any other device still
-    /// recorded there has moved, so commands must not reach this one.
     /// The id of the device adopted under `d`'s MAC, when `d` names a
-    /// different, unknown id.
+    /// different, unknown id. Only a device whose id *is* its stored MAC
+    /// (adopted without a deviceId) qualifies.
     fn mac_adopted(&self, d: &Discovered) -> Option<String> {
         if self.devices.contains_key(&d.id) {
             return None;
@@ -612,9 +615,14 @@ impl<H: Host, N: Net> Kasa<H, N> {
         if mac.is_empty() {
             return None;
         }
-        self.devices.keys().find(|id| norm_mac(id) == mac).cloned()
+        self.devices
+            .iter()
+            .find(|(id, p)| p.ident.mac.as_deref() == Some(id.as_str()) && norm_mac(id) == mac)
+            .map(|(id, _)| id.clone())
     }
 
+    /// A live reply from `kasa_id` at `address`: any other device still
+    /// recorded there has moved, so commands must not reach this one.
     fn claim_address(&mut self, kasa_id: &str, address: &str) {
         let mut moved = Vec::new();
         for (id, p) in &mut self.devices {
