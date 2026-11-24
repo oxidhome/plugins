@@ -637,7 +637,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 ),
                 model: s.model.as_deref().map(|m| clip(m).to_string()),
                 firmware: s.sw_ver.as_deref().map(|f| clip(f).to_string()),
-                mac: s.mac.as_deref().map(|m| clip(m).to_string()),
+                // Kept whole (it is compared for identity), but an
+                // overlong one is no MAC and is dropped.
+                mac: s
+                    .mac
+                    .as_deref()
+                    .filter(|m| m.len() <= MAX_STORED_NAME)
+                    .map(str::to_string),
                 address: d.address.to_string(),
                 class: Some(class),
             },
@@ -1327,8 +1333,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 s.probed.insert(*ip);
             }
         }
+        let mut drained = false;
         for _ in 0..MAX_REPLIES_PER_TICK {
             let Some((ip, data)) = self.net.udp_try_recv() else {
+                drained = true;
                 break;
             };
             // Without the broadcast, only hosts probed so far were asked.
@@ -1363,7 +1371,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 let until = *s
                     .listen_until_ms
                     .get_or_insert(now + discovery::DISCOVERY_WINDOW_MS);
-                now >= until
+                // Replies still queued past the deadline (a slow tick) are
+                // read first, for at most one more window.
+                now >= until && (drained || now >= until + discovery::DISCOVERY_WINDOW_MS)
             }
             _ => false,
         };

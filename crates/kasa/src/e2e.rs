@@ -317,6 +317,41 @@ fn unsolicited_replies_are_ignored_without_broadcast() {
     }
 }
 
+/// Replies queued past the listening deadline (a slow tick) are still
+/// read before the socket closes, beyond one tick's reply cap.
+#[test]
+fn queued_replies_are_drained_before_the_window_closes() {
+    let net = FakeNet {
+        now_ms: 1_000,
+        refuse_broadcast: true,
+        ..FakeNet::default()
+    };
+    let cfg = [("discovery_targets", Value::StringVal("192.168.1.10".into()))];
+    let mut k = Kasa::new(FakeHost::with_config(&cfg), net);
+    k.init();
+    k.tick();
+    assert!(k.net.udp_open);
+    // The window passes during a slow tick, with more replies queued
+    // than one tick reads.
+    k.net
+        .advance(crate::protocol::discovery::DISCOVERY_WINDOW_MS + 1);
+    for _ in 0..crate::kasa::MAX_REPLIES_PER_TICK {
+        k.net.udp_inbox.push_back((PLUG, b"junk".to_vec()));
+    }
+    let reply = json!({ "system": { "get_sysinfo": {
+        "type": "IOT.SMARTPLUGSWITCH", "model": "HS103(US)", "alias": "Late",
+        "deviceId": "LATE1", "mac": "AA:AA", "relay_state": 0 } } });
+    k.net.udp_inbox.push_back((
+        PLUG,
+        crate::protocol::cipher::encrypt(reply.to_string().as_bytes()),
+    ));
+    k.tick();
+    assert!(k.net.udp_open, "kept open while replies are queued");
+    k.tick();
+    assert!(k.device_id_of("LATE1").is_some());
+    assert!(!k.net.udp_open, "closed once drained");
+}
+
 #[test]
 fn devices_persist_and_come_back_without_discovery() {
     let k = discovered(&[], vec![(PLUG, plug()), (STRIP, strip())]);

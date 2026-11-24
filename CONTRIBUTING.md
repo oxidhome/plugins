@@ -188,7 +188,7 @@ Plugins in this repo follow semver from 1.0 onwards. Pre-1.0, breaking changes a
 
 - **Don't crash on bad input.** A malformed device response should be logged and ignored, not panic.
 - **Don't poll aggressively.** If your plugin polls a device, do it from `tick` with a sensible `tick_interval_ms` (>= 30s for most things) and let users tune it.
-- **Don't block.** Callbacks are synchronous; return promptly. The host's liveness watchdog reclaims an instance whose call doesn't return.
+- **Don't block.** Callbacks are synchronous; return promptly. The host's liveness watchdog reclaims an instance whose call doesn't return, but it can't interrupt a blocking socket call waiting inside the host: in `streaming-plugin`, use non-blocking sockets or set read and write timeouts.
 - **Report command outcomes honestly.** Return `err` only when the device was not touched, `unknown` when a command may have taken effect but can't be confirmed, and `accepted` plus a later `host::complete_command` when the device answers asynchronously.
 - **Persist what's needed, nothing more.** The KV storage interface has quotas. Don't store sensor history there — that's the host's job.
 - **Log usefully.** Use `oxidhome_sdk::tracing` after `oxidhome_sdk::logging::init()`, with appropriate levels: `info` for lifecycle, `debug` for normal operations, `warn` for recoverable issues, `error` for things the user needs to know about.

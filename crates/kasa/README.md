@@ -22,8 +22,9 @@ This is a port of the [Scrypted Kasa plugin](https://github.com/sv-tools/scrypte
 >   broadcast, so the plugin doesn't send it and finds devices only through
 >   `discovery_targets`; with none set it logs a warning once.
 > - **Waits on oxidhome/oxidhome#223:** camera control, snapshots, the live stream and
->   talkback (all HTTPS to self-signed cameras). Camera commands complete with
->   `err(unavailable)` naming #223.
+>   talkback (all HTTPS to self-signed cameras). Camera commands answer
+>   `err(unavailable)`: at once when the camera credentials aren't set, otherwise
+>   `accepted` and then a completion naming #223.
 > - **Waits on Phase 9:** media. `setup-pipeline` is exported and `host-media` pipes are
 >   wired, but the host doesn't call the export and its `host-media` answers
 >   `unavailable`.
