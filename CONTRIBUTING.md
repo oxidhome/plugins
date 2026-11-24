@@ -159,7 +159,7 @@ Plugins declare what they need in `manifest.toml`. Capability-gated host calls (
 ```toml
 [capabilities]
 # Outbound network rules: proto://host[:port], with CIDRs and wildcards.
-# Only `streaming-plugin` manifests may declare them; see below.
+# Only the streaming worlds may declare them; see below.
 network = ["udp://192.168.0.0/16:9999", "tcp://192.168.0.0/16:9999"]
 storage_quota_kb = 64              # KV storage; 0 or absent = no storage
 declares_devices = ["switch", "sensor"]
@@ -174,7 +174,7 @@ type = "secret"                    # never has a default
 description = "Cloud account password."
 ```
 
-The standard `plugin` world has no raw I/O: no sockets, and the host leaves WASI networking off, so validation refuses `network` rules on a `plugin` manifest. A plugin that talks to devices targets `streaming-plugin` (the SDK's `streaming-plugin` feature, `StreamingPlugin` and `streaming_plugin!`): `std::net` sockets and outgoing `wasi:http` work there, and the host checks every connect, send, name lookup and HTTP request against the granted rules, on the resolved address. LAN addresses need an IP or CIDR rule, or a name under `.local`, `.lan`, `.home.arpa` or `.internal`. Broadcast and multicast are refused, `wasi:http` serves plain `http://` only, and `host-media` answers `unavailable` until OxidHome's media phase. With `tick_interval_ms` set, the host also ticks a streaming plugin early when a socket it holds is readable.
+The standard `plugin` world has no raw I/O: no sockets, and the host leaves WASI networking off, so validation refuses `network` rules on a `plugin` (or `ai-plugin`) manifest; only `streaming-plugin` and `streaming-ai-plugin` may declare them. A plugin that talks to devices targets `streaming-plugin` (the SDK's `streaming-plugin` feature, `StreamingPlugin` and `streaming_plugin!`): `std::net` sockets and outgoing `wasi:http` work there, and the host checks every connect, send, name lookup and HTTP request against the granted rules, on the resolved address. LAN addresses need an IP or CIDR rule, or a name under `.local`, `.lan`, `.home.arpa` or `.internal`. Broadcast and multicast are refused, `wasi:http` serves plain `http://` only, and `host-media` answers `unavailable` until OxidHome's media phase. With `tick_interval_ms` set, the host also ticks a streaming plugin early when a socket it holds is readable.
 
 A `secret` field's value reaches the owning plugin in plain text through `host::config`; the host masks it in its API and scrubs it from plugin log output on a best-effort basis. Never log a credential or put one in an error message, event or device state.
 

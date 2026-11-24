@@ -162,6 +162,9 @@ struct Pending {
 #[derive(Debug)]
 struct Sweep {
     targets: Vec<Ipv4Addr>,
+    /// The broadcast probe went out, so a reply may come from any host
+    /// the network rules let through; otherwise only targets are heard.
+    broadcast: bool,
     next: usize,
     listen_until_ms: Option<u64>,
 }
@@ -223,7 +226,7 @@ pub struct Kasa<H: Host, N: Net> {
     /// The index as last stored.
     saved_index: Option<String>,
     warned_full: bool,
-    /// Warned that broadcast failed with no sweep to fall back on.
+    /// Warned that discovery has nothing to probe (no broadcast, no sweep).
     warned_no_broadcast: bool,
 }
 
@@ -1150,7 +1153,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 _ => self.publish(
                     kasa_id,
                     &Role::CameraChild(f),
-                    cap::SWITCH,
+                    mapping::on_off_cap(f),
                     switch_fields(on),
                 ),
             }
@@ -1253,27 +1256,39 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 return;
             }
             let probe = discovery::probe();
+            let mut broadcast = false;
+            let mut broadcast_err = None;
             if self.cfg.broadcast {
                 let to = SocketAddrV4::new(Ipv4Addr::BROADCAST, discovery::DISCOVERY_PORT);
-                if let Err(e) = self.net.udp_send(to, &probe) {
-                    // The unicast sweep below is the fallback; with none
-                    // configured, discovery can't find anything.
-                    if self.cfg.sweep.is_empty()
-                        && !std::mem::replace(&mut self.warned_no_broadcast, true)
-                    {
-                        self.log(
-                            Level::Warn,
-                            &format!(
-                                "discovery broadcast: {e}; set discovery_targets to find devices"
-                            ),
-                        );
-                    } else {
-                        self.log(Level::Debug, &format!("discovery broadcast: {e}"));
-                    }
+                match self.net.udp_send(to, &probe) {
+                    Ok(()) => broadcast = true,
+                    Err(e) => broadcast_err = Some(e),
                 }
+            }
+            if !broadcast && self.cfg.sweep.is_empty() {
+                // Nothing went out and nothing will: say what to configure
+                // once, and skip the listening window.
+                if !std::mem::replace(&mut self.warned_no_broadcast, true) {
+                    let why = broadcast_err.map_or_else(
+                        || "discovery_broadcast is off".to_string(),
+                        |e| format!("discovery broadcast: {e}"),
+                    );
+                    self.log(
+                        Level::Warn,
+                        &format!("{why}; set discovery_targets to find devices"),
+                    );
+                }
+                self.net.udp_close();
+                self.schedule_next_discovery(now);
+                return;
+            }
+            if let Some(e) = broadcast_err {
+                // The unicast sweep below is the fallback.
+                self.log(Level::Debug, &format!("discovery broadcast: {e}"));
             }
             self.sweep = Some(Sweep {
                 targets: discovery::sweep_hosts(&self.cfg.sweep),
+                broadcast,
                 next: 0,
                 listen_until_ms: None,
             });
@@ -1299,6 +1314,18 @@ impl<H: Host, N: Net> Kasa<H, N> {
             let Some((ip, data)) = self.net.udp_try_recv() else {
                 break;
             };
+            // Without the broadcast, only probed hosts were asked.
+            let asked = self
+                .sweep
+                .as_ref()
+                .is_some_and(|s| s.broadcast || s.targets.contains(&ip));
+            if !asked {
+                self.log(
+                    Level::Debug,
+                    &format!("discovery: ignoring an unsolicited reply from {ip}"),
+                );
+                continue;
+            }
             match discovery::parse_reply(ip, &data) {
                 Some(d) => self.adopt(&d, true),
                 None => self.log(
@@ -1571,15 +1598,15 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let a = &cmd.args;
         let ext = Ext::from_key(&cmd.capability);
         match (role, cmd.capability.as_str(), cmd.action.as_str(), ext) {
-            (Role::CameraChild(f), cap::SWITCH, "toggle", _) => {
+            (Role::CameraChild(f), c, "toggle", _) if c == mapping::on_off_cap(*f) => {
                 if !p.cam.features.contains_key(f) {
                     return Err(unavailable("current state unknown; use switch::set"));
                 }
                 Ok(CameraOp::Toggle(*f))
             }
-            (Role::CameraChild(f), cap::SWITCH, "set", _) => {
+            (Role::CameraChild(f), c, "set", _) if c == mapping::on_off_cap(*f) => {
                 let on = args::bool(a, "state")
-                    .ok_or_else(|| invalid("switch::set requires `state: bool`"))?;
+                    .ok_or_else(|| invalid(format!("{c}::set requires `state: bool`")))?;
                 // Privacy on = camera off.
                 let value = if *f == OnOffFeature::CameraEnabled {
                     !on
@@ -1679,7 +1706,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
                     let (capability, fields) = match f {
                         OnOffFeature::Led => (Ext::StatusLed.key(), led_fields(*on)),
                         OnOffFeature::CameraEnabled => (cap::SWITCH.into(), switch_fields(!*on)),
-                        _ => (cap::SWITCH.into(), switch_fields(*on)),
+                        _ => (mapping::on_off_cap(*f).into(), switch_fields(*on)),
                     };
                     self.publish_confirmed(&job.device_id, &capability, &fields);
                     CommandResult::OkWithState(fields)

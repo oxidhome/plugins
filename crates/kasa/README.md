@@ -16,8 +16,8 @@ This is a port of the [Scrypted Kasa plugin](https://github.com/sv-tools/scrypte
 > - **Works:** TCP 9999 to smart-home devices (polling, commands with H5 outcomes) and
 >   the paced UDP unicast sweep of `discovery_targets`, through `std::net` on
 >   `wasi:sockets`, checked by the host against the manifest's network rules. Discovery
->   replies wake the plugin early, so the 1 s tick is the cadence for polls and queued
->   commands only.
+>   replies wake the plugin early; every tick, early or on the 1 s fallback cadence,
+>   also runs queued commands and due polls.
 > - **Waits on slice 8.3:** the `255.255.255.255` broadcast probe. The host refuses
 >   broadcast, so the plugin doesn't send it and finds devices only through
 >   `discovery_targets`; with none set it logs a warning once.
@@ -67,7 +67,7 @@ ids are stable across restarts, keyed by the Kasa `deviceId`.
 | | `<id>/outlet-<childId>` | `switch`, named after the outlet's alias |
 | Camera | `<id>` | `video-stream`, `audio-stream`, `camera-control@1`, `status-led@1`, `motion@1` (opt-in), `pan-tilt@1` (when the camera has it) |
 | | `<id>/spotlight` | `switch` (when present) |
-| | `<id>/siren` | `switch` (when present; the camera stops it after its configured duration) |
+| | `<id>/siren` | `siren` (when present; the camera stops it after its configured duration). A sensitive capability: commanding it needs the host's `alarm` grant |
 | | `<id>/privacy` | `switch`: on = camera off (video stops for every client) |
 
 Every device carries the metadata `kasa_id`, `kasa_class`, `address` and `mac`.
@@ -75,6 +75,7 @@ Every device carries the metadata `kasa_id`, `kasa_class`, `address` and `mac`.
 ### Standard capabilities
 
 - **`switch`**: `set { state }`, `toggle`. State `state`.
+- **`siren`**: `set { state }`, `toggle`. State `state`.
 - **`dimmer`**: `set { level }` with `level` in (0, 1]. Kasa has no 0 % brightness, so
   use `switch` to turn the device off. State `level`.
 - **`color-light`**: `set { hue, saturation, value? }` (all 0–1), or
@@ -195,8 +196,9 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
 ### Sockets and HTTPS (Phase 8)
 
 0. **Closed (8.1).** The SDK has the `streaming-plugin` world: the component exports
-   `setup-pipeline` through `streaming_plugin!` and imports `wasi:sockets`, `wasi:http`
-   and `host-media`.
+   `setup-pipeline` through `streaming_plugin!`, and the world provides `wasi:sockets`,
+   `wasi:http` and `host-media`. (The release component imports only what it reaches:
+   with camera HTTPS stubbed, the optimizer drops `wasi:http` and `host-media`.)
 1. **Closed (8.1).** The world creates sockets, gated on `[capabilities] network`.
 2. **No broadcast (slice 8.3).** The host refuses broadcast and multicast sends, so the
    plugin doesn't send the `255.255.255.255:9999` probe. Unicast sweeps
@@ -214,8 +216,8 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    plugin computes both itself and sends them in its own requests, so the password does
    reach plugin memory.
 6. **Closed (8.1).** The host ticks the plugin early when a held socket is readable, so
-   discovery replies no longer wait for the next tick. Polls and queued camera commands
-   still run on the 1 s tick. The 3 ms discovery pacing blocks inside a tick, for about
+   discovery replies no longer wait for the 1 s fallback tick. Each tick, early or not,
+   also runs queued camera commands and due polls. The 3 ms discovery pacing blocks inside a tick, for about
    190 ms per 64 probes.
 
 ### Media (Phase 9)
@@ -245,8 +247,9 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
 
 12. **One sensor per device.** Live power gets a child `sensor` device. Voltage, current
     and energy totals live in the `energy-meter@1` extension.
-13. **No device role or type.** The siren and spotlight are plain `switch` devices; a UI
-    can't tell them apart from an outlet.
+13. **No device role or type.** The spotlight and privacy switch are plain `switch`
+    devices; a UI can't tell them apart from an outlet. (The siren uses the `siren`
+    capability.)
 14. **No settings, readme or device-config UI.** The Scrypted plugin's adoption form,
     per-device settings and energy readme are not ported. Energy history is published as
     JSON in the extension state instead.

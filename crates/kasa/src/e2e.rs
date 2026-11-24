@@ -237,6 +237,7 @@ fn refused_broadcast_falls_back_to_the_sweep() {
     let mut alone = run(&[("discovery_interval_s", Value::IntVal(60))]);
     assert!(alone.device_id_of("PLUG1").is_none());
     assert_eq!(warnings(&alone), 1);
+    assert!(!alone.net.udp_open, "no listening window with nothing sent");
     // The next run doesn't repeat the warning.
     alone.net.advance(60_000);
     for _ in 0..8 {
@@ -244,6 +245,39 @@ fn refused_broadcast_falls_back_to_the_sweep() {
         alone.net.advance(500);
     }
     assert_eq!(warnings(&alone), 1);
+
+    // Broadcast off and no targets: the same warning.
+    let off = run(&[("discovery_broadcast", Value::BoolVal(false))]);
+    assert_eq!(warnings(&off), 1);
+    assert_eq!(off.net.udp_sent, []);
+}
+
+/// Without the broadcast only swept hosts were asked, so a reply from
+/// anyone else is ignored rather than adopted.
+#[test]
+fn unsolicited_replies_are_ignored_without_broadcast() {
+    let mut net = FakeNet {
+        now_ms: 1_000,
+        refuse_broadcast: true,
+        ..FakeNet::default()
+    };
+    net.iot.insert(PLUG, plug());
+    let reply = json!({ "system": { "get_sysinfo": {
+        "type": "IOT.SMARTPLUGSWITCH", "model": "HS103(US)", "alias": "Intruder",
+        "deviceId": "EVIL1", "mac": "EE:EE", "relay_state": 0 } } });
+    net.udp_inbox.push_back((
+        BULB,
+        crate::protocol::cipher::encrypt(reply.to_string().as_bytes()),
+    ));
+    let cfg = [("discovery_targets", Value::StringVal("192.168.1.10".into()))];
+    let mut k = Kasa::new(FakeHost::with_config(&cfg), net);
+    k.init();
+    for _ in 0..8 {
+        k.tick();
+        k.net.advance(500);
+    }
+    assert!(k.device_id_of("PLUG1").is_some());
+    assert!(k.device_id_of("EVIL1").is_none());
 }
 
 #[test]
@@ -621,7 +655,7 @@ fn camera_commands_are_accepted_then_completed() {
         &siren,
         &cmd(
             "s1",
-            cap::SWITCH,
+            cap::SIREN,
             "set",
             vec![kv("state", Value::BoolVal(true))],
         ),
@@ -671,7 +705,7 @@ fn camera_commands_are_accepted_then_completed() {
         &siren,
         &cmd(
             "s2",
-            cap::SWITCH,
+            cap::SIREN,
             "set",
             vec![kv("state", Value::BoolVal(false))],
         ),
@@ -686,7 +720,7 @@ fn camera_commands_are_accepted_then_completed() {
         &siren,
         &cmd(
             "s3",
-            cap::SWITCH,
+            cap::SIREN,
             "set",
             vec![kv("state", Value::BoolVal(false))],
         ),
@@ -701,7 +735,7 @@ fn camera_commands_are_accepted_then_completed() {
         &siren,
         &cmd(
             "s4",
-            cap::SWITCH,
+            cap::SIREN,
             "set",
             vec![kv("state", Value::BoolVal(false))],
         ),
@@ -878,8 +912,14 @@ fn stream_pipeline_pumps_rtp_into_pipes() {
 fn queued_camera_toggles_run_in_order() {
     let mut k = with_camera(&creds(), FakeCam::basic());
     let siren = id(&k, "CAM1/siren");
-    k.execute_command(&siren, &cmd("t1", cap::SWITCH, "toggle", vec![]));
-    k.execute_command(&siren, &cmd("t2", cap::SWITCH, "toggle", vec![]));
+    // The siren answers on `siren`, not `switch`.
+    let r = k.execute_command(&siren, &cmd("t0", cap::SWITCH, "toggle", vec![]));
+    assert!(
+        matches!(r, CommandResult::Err(Error::InvalidArgument(_))),
+        "{r:?}"
+    );
+    k.execute_command(&siren, &cmd("t1", cap::SIREN, "toggle", vec![]));
+    k.execute_command(&siren, &cmd("t2", cap::SIREN, "toggle", vec![]));
     k.tick();
     let n = k.host.completed.len();
     assert_eq!(bool_field(&k.host.completed[n - 2].1, "state"), Some(true));
@@ -888,6 +928,11 @@ fn queued_camera_toggles_run_in_order() {
         k.net.cams[&CAM].values["smartlife.cam.ipcamera.siren"],
         "off"
     );
+    let events = k.host.events_for(&siren, cap::SIREN);
+    assert!(matches!(
+        events.last().and_then(|e| e.get("state")),
+        Some(Value::BoolVal(false))
+    ));
 }
 
 #[test]

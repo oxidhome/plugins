@@ -91,6 +91,19 @@ pub mod cap {
     pub const DIMMER: &str = "dimmer";
     pub const COLOR_LIGHT: &str = "color-light";
     pub const SENSOR: &str = "sensor";
+    pub const SIREN: &str = "siren";
+}
+
+/// The capability a camera's on/off child is commanded and reported
+/// through: `siren` for the siren (the host's sensitive `alarm`
+/// category), `switch` for the rest.
+#[must_use]
+pub fn on_off_cap(f: OnOffFeature) -> &'static str {
+    if f == OnOffFeature::Siren {
+        cap::SIREN
+    } else {
+        cap::SWITCH
+    }
 }
 
 /// What one registered `OxidHome` device is.
@@ -176,6 +189,7 @@ pub fn name_suffix(role: &Role) -> Option<&'static str> {
 pub fn capabilities(role: &Role, f: Features) -> Vec<CapabilitySpec> {
     let mut caps = Vec::new();
     match role {
+        Role::CameraChild(OnOffFeature::Siren) => caps.push(CapabilitySpec::Siren),
         Role::Relay | Role::Outlet { .. } | Role::CameraChild(_) => {
             caps.push(CapabilitySpec::Switch);
         }
@@ -488,6 +502,7 @@ mod tests {
                 CapabilitySpec::AudioStream => "audio-stream".into(),
                 CapabilitySpec::Button => "button".into(),
                 CapabilitySpec::Extension(e) => format!("ext:{}", e.name),
+                CapabilitySpec::Siren => "siren".into(),
                 // Not produced by this plugin.
                 other => format!("unexpected:{other:?}"),
             })
@@ -567,6 +582,13 @@ mod tests {
         );
         assert_eq!(
             names(&capabilities(&Role::CameraChild(OnOffFeature::Siren), cam)),
+            ["siren"]
+        );
+        assert_eq!(
+            names(&capabilities(
+                &Role::CameraChild(OnOffFeature::Spotlight),
+                cam
+            )),
             ["switch"]
         );
     }

@@ -120,7 +120,16 @@ impl PipeSink for WasiPipe {
             .0
             .as_ref()
             .ok_or_else(|| Error::Unavailable("pipe closed".into()))?;
-        w.write(data).map(|_| ())
+        let n = w.write(data)?;
+        // A short write would hand the pipeline a truncated RTP packet.
+        if usize::try_from(n).ok() == Some(data.len()) {
+            Ok(())
+        } else {
+            Err(Error::Unavailable(format!(
+                "short pipe write: {n} of {} bytes",
+                data.len()
+            )))
+        }
     }
 
     fn close(&mut self) {

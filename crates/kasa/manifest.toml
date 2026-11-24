@@ -65,6 +65,7 @@ declares_devices = [
   "dimmer",
   "color-light",
   "sensor",
+  "siren",
   "video-stream",
   "audio-stream",
   "extension(dev.oxidhome.kasa/status-led@1)",
