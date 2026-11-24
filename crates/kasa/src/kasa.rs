@@ -229,7 +229,8 @@ pub struct Kasa<H: Host, N: Net> {
     /// The index as last stored.
     saved_index: Option<String>,
     warned_full: bool,
-    /// Warned that discovery has nothing to probe (no broadcast, no sweep).
+    /// Warned that discovery sent nothing (no broadcast, and no sweep or
+    /// every sweep probe refused).
     warned_no_broadcast: bool,
 }
 
@@ -502,10 +503,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 p.ident.address.clone_from(&address);
                 changed = true;
             }
-            if let Some(fw) = &d.sysinfo.sw_ver
+            if let Some(fw) = d.sysinfo.sw_ver.as_deref().map(clip)
                 && p.ident.firmware.as_deref() != Some(fw)
             {
-                p.ident.firmware = Some(fw.clone());
+                p.ident.firmware = Some(fw.to_string());
                 changed = true;
             }
         } else {
@@ -636,7 +637,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 ),
                 model: s.model.as_deref().map(|m| clip(m).to_string()),
                 firmware: s.sw_ver.as_deref().map(|f| clip(f).to_string()),
-                mac: s.mac.clone(),
+                mac: s.mac.as_deref().map(|m| clip(m).to_string()),
                 address: d.address.to_string(),
                 class: Some(class),
             },
@@ -1351,7 +1352,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
             }
         }
         let now = self.net.monotonic_ms();
+        let mut nothing_sent = false;
         let done = match &mut self.sweep {
+            // Every probe was refused: there is nothing to listen for.
+            Some(s) if s.next >= s.targets.len() && !s.broadcast && s.probed.is_empty() => {
+                nothing_sent = true;
+                true
+            }
             Some(s) if s.next >= s.targets.len() => {
                 let until = *s
                     .listen_until_ms
@@ -1360,6 +1367,13 @@ impl<H: Host, N: Net> Kasa<H, N> {
             }
             _ => false,
         };
+        if nothing_sent && !std::mem::replace(&mut self.warned_no_broadcast, true) {
+            self.log(
+                Level::Warn,
+                "discovery: no probe went out (broadcast and every target refused); \
+                 check discovery_targets against the granted network rules",
+            );
+        }
         if done {
             self.sweep = None;
             self.net.udp_close();

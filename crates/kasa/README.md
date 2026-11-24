@@ -209,8 +209,10 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    serves plain `http://` only, and every camera port is HTTPS with a self-signed
    certificate. #223 adds HTTPS with trust-on-first-use pinning for LAN devices and an
    SDK blocking HTTP client; `Net::https` and `Net::https_stream` move onto it then.
-   Until then camera commands (control, PTZ, snapshots) complete with
-   `err(unavailable)`, `setup-pipeline` returns an error string, and talkback has no
+   Until then a camera registers with only what discovery shows: `camera-control@1`
+   (`reboot`, `snapshot`) completes with `err(unavailable)`, and pan-tilt and the
+   spotlight, siren and privacy children never appear, because the probe that finds
+   them needs HTTPS. `setup-pipeline` returns an error string, and talkback has no
    entry point yet (gap 11).
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The

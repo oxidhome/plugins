@@ -250,6 +250,26 @@ fn refused_broadcast_falls_back_to_the_sweep() {
     let off = run(&[("discovery_broadcast", Value::BoolVal(false))]);
     assert_eq!(warnings(&off), 1);
     assert_eq!(off.net.udp_sent, []);
+
+    // Every target refused by the host: no listening window, one warning.
+    let mut net = FakeNet {
+        now_ms: 1_000,
+        refuse_broadcast: true,
+        refuse_to: vec![PLUG],
+        ..FakeNet::default()
+    };
+    net.iot.insert(PLUG, plug());
+    let mut refused = Kasa::new(
+        FakeHost::with_config(&[("discovery_targets", Value::StringVal("192.168.1.10".into()))]),
+        net,
+    );
+    refused.init();
+    refused.tick();
+    assert!(
+        !refused.net.udp_open,
+        "no listening window with nothing sent"
+    );
+    assert_eq!(warnings(&refused), 1);
 }
 
 /// Without the broadcast only hosts a probe went out to were asked, so a

@@ -261,10 +261,11 @@ impl SweepTarget {
     pub fn hosts(self) -> impl Iterator<Item = Ipv4Addr> {
         let base = u32::from(self.network);
         let size = 1u32 << (32 - u32::from(self.prefix));
+        // `size - 1` first: `base + size` overflows for 255.255.255.255.
         let (first, last) = if size <= 2 {
-            (base, base + size - 1)
+            (base, base + (size - 1))
         } else {
-            (base + 1, base + size - 2)
+            (base + 1, base + (size - 2))
         };
         (first..=last).map(Ipv4Addr::from)
     }
@@ -422,6 +423,19 @@ mod tests {
         assert!(SweepTarget::parse("10.0.0.0/33").is_err());
         assert!(SweepTarget::parse("10.0.0.0/x").is_err());
         assert!(SweepTarget::parse("host.local").is_err());
+        // The top of the address space doesn't overflow.
+        let top: Vec<Ipv4Addr> = SweepTarget::parse("255.255.255.255")
+            .unwrap()
+            .hosts()
+            .collect();
+        assert_eq!(top, [Ipv4Addr::BROADCAST]);
+        assert_eq!(
+            SweepTarget::parse("255.255.255.0/24")
+                .unwrap()
+                .hosts()
+                .last(),
+            Some(Ipv4Addr::new(255, 255, 255, 254))
+        );
         let one = SweepTarget::parse(" 10.0.0.9 ").unwrap();
         assert_eq!(
             one.hosts().collect::<Vec<_>>(),
