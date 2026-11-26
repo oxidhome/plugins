@@ -31,13 +31,12 @@ pub const MIME_G711U: &str = "audio/g711u";
 pub const MAX_HEADER_BYTES: usize = 32 * 1024;
 /// Largest part payload accepted (a 1080p IDR is ~100 KB).
 pub const MAX_PART_BYTES: usize = 8 * 1024 * 1024;
-/// Idle timeout while connecting and waiting for headers. After the
-/// headers, no read timeout: the stream goes quiet for seconds on weak
-/// Wi-Fi and recovers; TCP keepalive (30 s initial idle) detects a dead
-/// connection instead.
+/// Deadline for connecting and receiving the response headers.
 pub const STREAM_CONNECT_TIMEOUT_MS: u64 = 10_000;
-/// TCP keepalive initial idle on the stream socket.
-pub const STREAM_KEEPALIVE_IDLE_MS: u64 = 30_000;
+/// After the headers, a stream with no data for this long has ended. The
+/// stream goes quiet for seconds on weak Wi-Fi and recovers, so this is
+/// long; `wasi:http` has no TCP keepalive to detect a dead peer sooner.
+pub const STREAM_IDLE_TIMEOUT_MS: u64 = 60_000;
 
 /// Builds the live stream request with stream credentials.
 #[must_use]

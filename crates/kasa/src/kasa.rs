@@ -162,11 +162,12 @@ struct Pending {
 #[derive(Debug)]
 struct Sweep {
     targets: Vec<Ipv4Addr>,
-    /// The broadcast probe went out, so a reply may come from any host
-    /// the network rules let through; otherwise only targets are heard.
-    broadcast: bool,
-    /// Targets a probe actually went out to; only they are heard
-    /// without the broadcast.
+    /// The `255.255.255.255` probe went out, so a reply may come from
+    /// any host the network rules let through.
+    limited_broadcast: bool,
+    /// Networks whose subnet broadcast went out; their hosts are heard.
+    broadcast_nets: Vec<LocalNetwork>,
+    /// Targets a probe actually went out to; they are heard too.
     probed: HashSet<Ipv4Addr>,
     next: usize,
     listen_until_ms: Option<u64>,
@@ -1294,44 +1295,58 @@ impl<H: Host, N: Net> Kasa<H, N> {
             return false;
         }
         let probe = discovery::probe();
-        let mut broadcast = false;
+        let mut limited_broadcast = false;
+        let mut broadcast_nets: Vec<LocalNetwork> = Vec::new();
         let mut refused = Vec::new();
         if self.cfg.broadcast {
-            let mut targets = vec![Ipv4Addr::BROADCAST];
-            // Some networks drop the limited broadcast (or the host has
-            // several interfaces); the subnet broadcast reaches them.
-            targets.extend(
-                self.net
-                    .local_networks()
-                    .iter()
-                    .filter_map(LocalNetwork::broadcast),
-            );
-            targets.dedup();
-            for ip in targets {
-                match self
-                    .net
-                    .udp_send(SocketAddrV4::new(ip, discovery::DISCOVERY_PORT), &probe)
-                {
-                    Ok(()) => broadcast = true,
-                    Err(e) => refused.push(format!("{ip}: {e}")),
+            let to = SocketAddrV4::new(Ipv4Addr::BROADCAST, discovery::DISCOVERY_PORT);
+            match self.net.udp_send(to, &probe) {
+                Ok(()) => limited_broadcast = true,
+                Err(e) => refused.push(format!("{}: {e}", to.ip())),
+            }
+            // Some networks drop the limited broadcast, and a host with
+            // several interfaces sends it on one; the subnet broadcast of
+            // each local network reaches them.
+            // Overlapping networks share a broadcast address: sent once.
+            let mut sent: Vec<(Ipv4Addr, bool)> = Vec::new();
+            for net in self.net.local_networks() {
+                let Some(ip) = net.broadcast() else { continue };
+                let ok = if let Some(&(_, ok)) = sent.iter().find(|(a, _)| *a == ip) {
+                    ok
+                } else {
+                    let to = SocketAddrV4::new(ip, discovery::DISCOVERY_PORT);
+                    let ok = match self.net.udp_send(to, &probe) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            refused.push(format!("{ip}: {e}"));
+                            false
+                        }
+                    };
+                    sent.push((ip, ok));
+                    ok
+                };
+                if ok {
+                    broadcast_nets.push(net);
                 }
             }
         }
+        let broadcast = limited_broadcast || !broadcast_nets.is_empty();
         if !broadcast && self.cfg.sweep.is_empty() {
             // Nothing went out and nothing will: say what to configure
             // once, and skip the listening window.
             if !std::mem::replace(&mut self.warned_no_broadcast, true) {
-                let why = if self.cfg.broadcast {
-                    format!("discovery broadcast refused ({})", refused.join("; "))
+                let msg = if self.cfg.broadcast {
+                    format!(
+                        "discovery broadcast refused ({}); grant udp://255.255.255.255:9999 \
+                         or set discovery_targets to find devices",
+                        refused.join("; ")
+                    )
                 } else {
-                    "discovery_broadcast is off".to_string()
+                    "discovery_broadcast is off; turn it on or set discovery_targets \
+                     to find devices"
+                        .to_string()
                 };
-                self.log(
-                    Level::Warn,
-                    &format!(
-                        "{why}; grant udp://255.255.255.255:9999 or set discovery_targets to find devices"
-                    ),
-                );
+                self.log(Level::Warn, &msg);
             }
             self.net.udp_close();
             self.schedule_next_discovery(now);
@@ -1345,7 +1360,8 @@ impl<H: Host, N: Net> Kasa<H, N> {
         }
         self.sweep = Some(Sweep {
             targets: discovery::sweep_hosts(&self.cfg.sweep),
-            broadcast,
+            limited_broadcast,
+            broadcast_nets,
             probed: HashSet::new(),
             next: 0,
             listen_until_ms: None,
@@ -1385,11 +1401,14 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 drained = true;
                 break;
             };
-            // Without the broadcast, only hosts probed so far were asked.
-            let asked = self
-                .sweep
-                .as_ref()
-                .is_some_and(|s| s.broadcast || s.probed.contains(&ip));
+            // Only hosts a probe reached were asked: anyone after the
+            // limited broadcast, otherwise the broadcast networks and the
+            // targets probed so far.
+            let asked = self.sweep.as_ref().is_some_and(|s| {
+                s.limited_broadcast
+                    || s.broadcast_nets.iter().any(|n| n.contains(ip.into()))
+                    || s.probed.contains(&ip)
+            });
             if !asked {
                 self.log(
                     Level::Debug,
@@ -1409,7 +1428,12 @@ impl<H: Host, N: Net> Kasa<H, N> {
         let mut nothing_sent = false;
         let done = match &mut self.sweep {
             // Every probe was refused: there is nothing to listen for.
-            Some(s) if s.next >= s.targets.len() && !s.broadcast && s.probed.is_empty() => {
+            Some(s)
+                if s.next >= s.targets.len()
+                    && !s.limited_broadcast
+                    && s.broadcast_nets.is_empty()
+                    && s.probed.is_empty() =>
+            {
                 nothing_sent = true;
                 true
             }

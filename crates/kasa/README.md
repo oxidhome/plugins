@@ -125,7 +125,7 @@ watchdog. Queued commands and due polls that don't fit wait for the next tick, i
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `discovery` | bool | `true` | Run UDP discovery. |
-| `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255 and to the subnet broadcast of each of the host's networks that the granted UDP rules cover whole (`host-network::local-networks`). |
+| `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255 and to the subnet broadcast of each of the host's networks that a granted IP or CIDR rule covers whole (`host-network::local-networks`; the send also needs a `udp` rule). |
 | `discovery_targets` | string | empty | Fallback for devices broadcast doesn't reach: comma-separated addresses, or /24-or-narrower networks, to probe one by one, 3 ms apart. Some cameras (KC420WS) ignore broadcast but answer unicast, and devices on another VLAN never hear it. A single address works as a manual add. At most 1,024 hosts per run; past that, the rest are skipped and a warning is logged at start. |
 | `discovery_interval_s` | int | 300 | Seconds between discovery runs; 0 runs it only at start; minimum 60. |
 | `poll_interval_s` | int | 30 | State poll interval per device; minimum 5. |
@@ -167,7 +167,8 @@ reuse), nothing more is sent there until discovery finds the device again.
 - The Kasa account password is a `secret` config field. It is sent only to cameras on the
   LAN:
   - base64-encoded as the Basic-auth password on 19443;
-  - as an md5 hex digest on 10443 and 18443.
+  - as an md5 hex digest on 10443 (and on 18443 for talkback, which nothing drives
+    yet).
 
   Both encodings are trivially reversible or brute-forceable, and that is the firmware's
   scheme, not this plugin's. The password never goes to the cloud.
@@ -178,11 +179,12 @@ reuse), nothing more is sent there until discovery finds the device again.
   answers first at that address when the pin is made is trusted, so a LAN attacker
   present at that moment, or at an address a camera moves to, can still capture those
   credentials. Use a dedicated Kasa account, or isolate cameras on their own VLAN.
-- Discovery replies are unauthenticated UDP. The plugin follows a known device to a new
-  address when discovery sees it there (DHCP changes). A LAN attacker who answers probes
-  with a camera's id moves the camera to its own address, where no pin exists yet, and
-  receives that camera's credential encodings. Turn `discovery` off once cameras are
-  adopted to freeze their addresses.
+- Discovery replies are unauthenticated UDP, and cameras are adopted automatically: any
+  host that answers a probe as a camera is polled with the credential encodings. The
+  plugin also follows a known device to a new address when discovery sees it there (DHCP
+  changes), so a LAN attacker who answers with a camera's id moves the camera to its own
+  address, where no pin exists yet. Turn `discovery` off once cameras are adopted to
+  freeze the device list and their addresses.
 - The IOT protocol has no authentication. Anyone on the LAN can switch these devices,
   and the plugin adds no protection.
 - Every device reply is untrusted:
@@ -214,11 +216,13 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    host's networks the grant covers whole; the plugin sends each one's subnet broadcast.
    (It doesn't unicast-sweep them as the Scrypted plugin does; cameras that ignore
    broadcast go in `discovery_targets`.)
-4. **Closed (oxidhome/oxidhome#223).** Camera HTTPS runs over `wasi:http`: LINKIE2 and
-   snapshots through the SDK's blocking client, and the live stream through the raw
-   `wasi:http` bindings, since the client buffers whole bodies. The host trusts a
-   camera's self-signed certificate on first use and pins it; for IP-literal URLs only
-   the name check is skipped.
+4. **Closed (oxidhome/oxidhome#223).** Camera HTTPS runs over `wasi:http`. The host
+   trusts a camera's self-signed certificate on first use and pins it; for IP-literal
+   URLs only the name check is skipped. The plugin uses the SDK's `wasi:http` bindings,
+   not its blocking client: the client's timeout bounds each phase and each gap between
+   body chunks rather than the whole exchange (a trickling camera could hold a `tick`
+   past the host's watchdog), and it buffers whole bodies, which the live stream doesn't
+   have. One deadline covers each exchange here.
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
    plugin computes both itself and sends them in its own requests, so the password does
@@ -311,7 +315,7 @@ Layout:
 | `src/kasa.rs` | Plugin logic over `Host` + `Net`. |
 | `src/mapping.rs` | Device and capability mapping. |
 | `src/media.rs` | Stream session: multipart → RTP → pipes. |
-| `src/wasm.rs` | Component exports through `oxidhome-sdk` (`streaming_plugin!`), and `Host`/`Net` over the SDK host calls, `host-media` and `std::net`. |
+| `src/wasm.rs` | Component exports through `oxidhome-sdk` (`streaming_plugin!`), and `Host`/`Net` over the SDK host calls, `host-media`, `std::net` (TCP), the discovery socket and `wasi:http`. |
 | `src/fake.rs`, `src/e2e.rs` | Simulated devices and end-to-end tests. |
 | `tests/manifest.rs` | Validates `manifest.toml` with the host's `oxidhome-manifest`. |
 

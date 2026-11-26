@@ -296,6 +296,14 @@ fn subnet_broadcast_finds_devices_on_local_networks() {
             ..FakeNet::default()
         };
         net.iot.insert(PLUG, plug());
+        // Unsolicited, from a network no probe went to.
+        let reply = json!({ "system": { "get_sysinfo": {
+            "type": "IOT.SMARTPLUGSWITCH", "model": "HS103(US)", "alias": "Other",
+            "deviceId": "OTHER", "mac": "EE:EE", "relay_state": 0 } } });
+        net.udp_inbox.push_back((
+            Ipv4Addr::new(192, 168, 2, 1),
+            crate::protocol::cipher::encrypt(reply.to_string().as_bytes()),
+        ));
         let mut k = Kasa::new(FakeHost::with_config(cfg), net);
         k.init();
         for _ in 0..8 {
@@ -306,6 +314,10 @@ fn subnet_broadcast_finds_devices_on_local_networks() {
     };
     let k = run(&[]);
     assert!(k.device_id_of("PLUG1").is_some());
+    assert!(
+        k.device_id_of("OTHER").is_none(),
+        "a reply from outside the broadcast networks is ignored"
+    );
     assert_eq!(
         k.net.udp_sent,
         [SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 255), 9999)]
