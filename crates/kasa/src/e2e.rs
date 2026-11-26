@@ -1,13 +1,13 @@
 //! End-to-end tests of [`Kasa`] over the fake host and network.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use serde_json::json;
 
 use crate::fake::{FakeCam, FakeHost, FakeIot, FakeNet};
 use crate::kasa::{Kasa, STORAGE_KEY};
 use crate::mapping::{Ext, cap};
-use crate::platform::NetError;
+use crate::platform::{LocalNetwork, NetError};
 use oxidhome_sdk::bindings::oxidhome::plugin::devices::{Command, CommandResult};
 use oxidhome_sdk::bindings::oxidhome::plugin::logging::Level;
 use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
@@ -203,10 +203,11 @@ fn sweep_is_paced_and_finds_unicast_only_devices() {
     assert!(k.device_id_of("PLUG1").is_some());
 }
 
-/// Before slice 8.3 the host refuses broadcast: the sweep still finds
-/// devices, and without one the plugin says what to configure, once.
+/// Without a grant for the broadcast (and no local network covered), the
+/// unicast targets still find devices, and without them the plugin says
+/// what to configure, once.
 #[test]
-fn refused_broadcast_falls_back_to_the_sweep() {
+fn refused_broadcast_falls_back_to_the_targets() {
     let run = |cfg: &[(&str, Value)]| {
         let mut net = FakeNet {
             now_ms: 1_000,
@@ -270,6 +271,54 @@ fn refused_broadcast_falls_back_to_the_sweep() {
         "no listening window with nothing sent"
     );
     assert_eq!(warnings(&refused), 1);
+}
+
+/// The probe also goes to the subnet broadcast of each local network
+/// the grant covers, which reaches devices when the limited broadcast is
+/// refused (or dropped by the network), with no targets configured.
+#[test]
+fn subnet_broadcast_finds_devices_on_local_networks() {
+    let run = |cfg: &[(&str, Value)]| {
+        let mut net = FakeNet {
+            now_ms: 1_000,
+            refuse_broadcast: true,
+            local_nets: vec![
+                LocalNetwork {
+                    address: "192.168.1.0".parse().unwrap(),
+                    prefix_len: 24,
+                },
+                // No subnet broadcast: skipped.
+                LocalNetwork {
+                    address: "10.9.0.0".parse().unwrap(),
+                    prefix_len: 31,
+                },
+            ],
+            ..FakeNet::default()
+        };
+        net.iot.insert(PLUG, plug());
+        let mut k = Kasa::new(FakeHost::with_config(cfg), net);
+        k.init();
+        for _ in 0..8 {
+            k.tick();
+            k.net.advance(500);
+        }
+        k
+    };
+    let k = run(&[]);
+    assert!(k.device_id_of("PLUG1").is_some());
+    assert_eq!(
+        k.net.udp_sent,
+        [SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 255), 9999)]
+    );
+    assert!(
+        !k.host.logs.iter().any(|(l, _)| matches!(l, Level::Warn)),
+        "{:?}",
+        k.host.logs
+    );
+    // `discovery_broadcast = false` turns off subnet broadcasts too.
+    let off = run(&[("discovery_broadcast", Value::BoolVal(false))]);
+    assert_eq!(off.net.udp_sent, []);
+    assert!(off.device_id_of("PLUG1").is_none());
 }
 
 /// Without the broadcast only hosts a probe went out to were asked, so a

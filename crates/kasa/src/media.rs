@@ -6,7 +6,7 @@
 //! this plugin produces, with value semantics (`PartialEq`) the generated
 //! bindings don't have, and [`to_wit`] converts a pipeline for the
 //! `setup-pipeline` export. It can't run end to end until `OxidHome` ships
-//! camera HTTPS (#223) and media (Phase 9): the host's `host-media` is a
+//! media (Phase 9): the host's `host-media` is a
 //! placeholder that answers `unavailable`, and several pieces have no WIT
 //! counterpart yet (see the README's "Platform gaps"): the pipeline
 //! returned by `setup-pipeline` and the writer from `open-pipe` aren't

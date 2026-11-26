@@ -9,7 +9,7 @@
 //!   anything was sent is `err`; a request that went out without a usable
 //!   reply is `unknown`.
 //! - Camera calls go over HTTPS to a camera that must be called serially
-//!   and can take 2 × 5 s (stale kept-alive socket, then one retry). They
+//!   and can take several seconds (connect, TLS, a slow answer). They
 //!   answer `accepted` and run on the next `tick`, which reports the
 //!   result with `complete-command`.
 
@@ -25,7 +25,7 @@ use crate::mapping::{
     switch_fields,
 };
 use crate::media::{self, MediaPipeline, StreamSession};
-use crate::platform::{Host, Net, NetError};
+use crate::platform::{Host, LocalNetwork, Net, NetError};
 use crate::protocol::camera::{self, OnOffFeature, PtzCapability, PtzDirection, PtzPreset};
 use crate::protocol::discovery::{self, Discovered, KasaClass};
 use crate::protocol::http::{control_auth, stream_auth};
@@ -1278,7 +1278,9 @@ impl<H: Host, N: Net> Kasa<H, N> {
     // ── Discovery ─────────────────────────────────────────────────────
 
     /// Starts a discovery run when one is due: opens the socket, sends
-    /// the broadcast, and sets up the sweep. Returns whether a run is on.
+    /// the broadcast probes (the limited broadcast and each local
+    /// network's subnet broadcast), and sets up the unicast probes of
+    /// `discovery_targets`. Returns whether a run is on.
     fn start_discovery(&mut self, now: u64) -> bool {
         let Some(due) = self.next_discovery_ms else {
             return false;
@@ -1286,41 +1288,60 @@ impl<H: Host, N: Net> Kasa<H, N> {
         if now < due {
             return false;
         }
-        if let Err(e) = self.net.udp_open(self.cfg.broadcast) {
+        if let Err(e) = self.net.udp_open() {
             self.log(Level::Warn, &format!("discovery socket: {e}"));
             self.schedule_next_discovery(now);
             return false;
         }
         let probe = discovery::probe();
         let mut broadcast = false;
-        let mut broadcast_err = None;
+        let mut refused = Vec::new();
         if self.cfg.broadcast {
-            let to = SocketAddrV4::new(Ipv4Addr::BROADCAST, discovery::DISCOVERY_PORT);
-            match self.net.udp_send(to, &probe) {
-                Ok(()) => broadcast = true,
-                Err(e) => broadcast_err = Some(e),
+            let mut targets = vec![Ipv4Addr::BROADCAST];
+            // Some networks drop the limited broadcast (or the host has
+            // several interfaces); the subnet broadcast reaches them.
+            targets.extend(
+                self.net
+                    .local_networks()
+                    .iter()
+                    .filter_map(LocalNetwork::broadcast),
+            );
+            targets.dedup();
+            for ip in targets {
+                match self
+                    .net
+                    .udp_send(SocketAddrV4::new(ip, discovery::DISCOVERY_PORT), &probe)
+                {
+                    Ok(()) => broadcast = true,
+                    Err(e) => refused.push(format!("{ip}: {e}")),
+                }
             }
         }
         if !broadcast && self.cfg.sweep.is_empty() {
             // Nothing went out and nothing will: say what to configure
             // once, and skip the listening window.
             if !std::mem::replace(&mut self.warned_no_broadcast, true) {
-                let why = broadcast_err.map_or_else(
-                    || "discovery_broadcast is off".to_string(),
-                    |e| format!("discovery broadcast: {e}"),
-                );
+                let why = if self.cfg.broadcast {
+                    format!("discovery broadcast refused ({})", refused.join("; "))
+                } else {
+                    "discovery_broadcast is off".to_string()
+                };
                 self.log(
                     Level::Warn,
-                    &format!("{why}; set discovery_targets to find devices"),
+                    &format!(
+                        "{why}; grant udp://255.255.255.255:9999 or set discovery_targets to find devices"
+                    ),
                 );
             }
             self.net.udp_close();
             self.schedule_next_discovery(now);
             return false;
         }
-        if let Some(e) = broadcast_err {
-            // The unicast sweep below is the fallback.
-            self.log(Level::Debug, &format!("discovery broadcast: {e}"));
+        if !refused.is_empty() {
+            self.log(
+                Level::Debug,
+                &format!("discovery broadcast refused: {}", refused.join("; ")),
+            );
         }
         self.sweep = Some(Sweep {
             targets: discovery::sweep_hosts(&self.cfg.sweep),
@@ -1405,7 +1426,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
         if nothing_sent && !std::mem::replace(&mut self.warned_no_broadcast, true) {
             self.log(
                 Level::Warn,
-                "discovery: no probe went out (broadcast and every target refused); \
+                "discovery: no probe went out (every broadcast and target refused); \
                  check discovery_targets against the granted network rules",
             );
         }

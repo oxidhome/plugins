@@ -9,25 +9,22 @@ password, because they use them to authenticate local requests.
 
 This is a port of the [Scrypted Kasa plugin](https://github.com/sv-tools/scrypted-kasa-plugin).
 
-> **Status: plugs, switches, dimmers, bulbs and strips work; cameras wait on HTTPS and
-> media.** The component targets the `streaming-plugin` world (OxidHome Phase 8.1,
-> `oxidhome` `a2d47d9`):
+> **Status: plugs, switches, dimmers, bulbs, strips and camera controls work; camera
+> video waits on media.** The component targets the `streaming-plugin` world (`oxidhome`
+> `85a3ae3`):
 >
-> - **Works:** TCP 9999 to smart-home devices (polling, commands with H5 outcomes) and
->   the paced UDP unicast sweep of `discovery_targets`, through `std::net` on
->   `wasi:sockets`, checked by the host against the manifest's network rules. Discovery
->   replies wake the plugin early; every tick, early or on the 1 s fallback cadence,
->   also runs queued commands and due polls.
-> - **Waits on slice 8.3:** the `255.255.255.255` broadcast probe. The host refuses
->   broadcast, so the plugin doesn't send it and finds devices only through
->   `discovery_targets`; with none set it logs a warning once.
-> - **Waits on oxidhome/oxidhome#223:** camera control, snapshots, the live stream and
->   talkback (all HTTPS to self-signed cameras). Camera commands answer
->   `err(unavailable)`: at once when the camera credentials aren't set, otherwise
->   `accepted` and then a completion naming #223.
-> - **Waits on Phase 9:** media. `setup-pipeline` is exported and `host-media` pipes are
->   wired, but the host doesn't call the export and its `host-media` answers
->   `unavailable`.
+> - **Works:** discovery by broadcast through the host's discovery socket (the
+>   `255.255.255.255` probe and the subnet broadcast of each local network the grant
+>   covers), with `discovery_targets` as a unicast fallback; TCP 9999 to smart-home
+>   devices (polling, commands with H5 outcomes); and camera control and snapshots over
+>   HTTPS (LINKIE2 on 10443, snapshots on 19443) through the SDK's `wasi:http` client,
+>   which trusts each camera's self-signed certificate on first use. The host checks every
+>   send, connect and request against the manifest's network rules. Discovery replies wake
+>   the plugin early; every tick, early or on the 1 s fallback cadence, also runs queued
+>   camera commands and due polls.
+> - **Waits on Phase 9:** media. `setup-pipeline` is exported and opens the camera's live
+>   stream over HTTPS into `host-media` pipes, but the host doesn't call the export and its
+>   `host-media` answers `unavailable`.
 >
 > Everything below the host boundary is also tested natively against fakes: the protocol
 > core, discovery, polling, commands, camera controls and stream re-packetization into
@@ -128,8 +125,8 @@ watchdog. Queued commands and due polls that don't fit wait for the next tick, i
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `discovery` | bool | `true` | Run UDP discovery. |
-| `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255. Has no effect until OxidHome slice 8.3: the host refuses broadcast, so list `discovery_targets`. |
-| `discovery_targets` | string | empty | Comma-separated /24-or-narrower networks or addresses to probe one by one, 3 ms apart. Some cameras (KC420WS) ignore broadcast but answer unicast. A single address works as a manual add. A sweep covers at most 1,024 hosts; past that, the rest are skipped and a warning is logged at start. |
+| `discovery_broadcast` | bool | `true` | Send the probe to 255.255.255.255 and to the subnet broadcast of each of the host's networks that the granted UDP rules cover whole (`host-network::local-networks`). |
+| `discovery_targets` | string | empty | Fallback for devices broadcast doesn't reach: comma-separated addresses, or /24-or-narrower networks, to probe one by one, 3 ms apart. Some cameras (KC420WS) ignore broadcast but answer unicast, and devices on another VLAN never hear it. A single address works as a manual add. At most 1,024 hosts per run; past that, the rest are skipped and a warning is logged at start. |
 | `discovery_interval_s` | int | 300 | Seconds between discovery runs; 0 runs it only at start; minimum 60. |
 | `poll_interval_s` | int | 30 | State poll interval per device; minimum 5. |
 | `camera_username` | string | empty | Kasa account email. |
@@ -146,16 +143,21 @@ reuse), nothing more is sent there until discovery finds the device again.
 
 ## Required capabilities
 
-- **Network:** private ranges only (10/8, 172.16/12, 192.168/16) on the Kasa ports.
-  - UDP 9999: discovery, including the 255.255.255.255 broadcast (refused by the host
-    until slice 8.3; the rule is declared now so the grant doesn't change then).
+- **Network:** private ranges only (10/8, 172.16/12, 192.168/16) on the Kasa ports, plus
+  the limited broadcast. The owner can narrow the ranges to the LAN's real subnet when
+  granting.
+  - UDP `255.255.255.255:9999`: the broadcast probe. A broadcast needs a rule naming that
+    exact address and port; no range covers it.
+  - UDP 9999 on the private ranges: the replies (devices answer from their own address),
+    the subnet broadcast of each local network a rule covers whole, and
+    `discovery_targets`. A rule narrower than the interface's network turns the subnet
+    broadcast off for it.
   - TCP 9999: plugs, switches and bulbs.
   - HTTPS 10443: camera control.
   - HTTPS 19443: stream and snapshots.
-  - HTTPS 18443: two-way audio. The talkback framing is implemented, but nothing drives
-    it yet.
 
-  The HTTPS rules are unused until oxidhome/oxidhome#223.
+  Two-way audio (HTTPS 18443) isn't requested: the talkback framing is implemented, but
+  nothing can drive it yet (gap 11).
 - **Devices:** the capability keys in the mapping table.
 - **Storage:** 512 KB, for up to 256 devices at a few hundred bytes to ~2 KB each.
 - **Blobs:** 16 MB, enough for one snapshot per camera, overwritten in place.
@@ -169,15 +171,18 @@ reuse), nothing more is sent there until discovery finds the device again.
 
   Both encodings are trivially reversible or brute-forceable, and that is the firmware's
   scheme, not this plugin's. The password never goes to the cloud.
-- Camera certificates are self-signed. The plugin can't verify them, so a LAN attacker
-  can impersonate a camera and capture those credentials. Use a dedicated Kasa account,
-  or isolate cameras on their own VLAN.
+- Camera certificates are self-signed. The host trusts each on first use and pins it per
+  address and port; a different certificate there is refused (and audited) until the
+  owner resets the pin with `oxidhome tls-pin reset`. Requests go to the camera's IP, so
+  the certificate's name isn't checked; the pin is what ties it to the camera. Whoever
+  answers first at that address when the pin is made is trusted, so a LAN attacker
+  present at that moment, or at an address a camera moves to, can still capture those
+  credentials. Use a dedicated Kasa account, or isolate cameras on their own VLAN.
 - Discovery replies are unauthenticated UDP. The plugin follows a known device to a new
-  address when discovery sees it there (DHCP changes). Once camera HTTPS lands (gap 4),
-  a LAN attacker who answers probes with a camera's id would receive that camera's
-  credential encodings, unless the certificate pin catches it; turn `discovery` off once
-  cameras are adopted to freeze their addresses. In this build no camera request is
-  sent, so no credential leaves the plugin.
+  address when discovery sees it there (DHCP changes). A LAN attacker who answers probes
+  with a camera's id moves the camera to its own address, where no pin exists yet, and
+  receives that camera's credential encodings. Turn `discovery` off once cameras are
+  adopted to freeze their addresses.
 - The IOT protocol has no authentication. Anyone on the LAN can switch these devices,
   and the plugin adds no protection.
 - Every device reply is untrusted:
@@ -191,38 +196,37 @@ reuse), nothing more is sent there until discovery finds the device again.
 
 ## Platform gaps
 
-These are what the SDK, the current WIT (`oxidhome:plugin@0.1.0` at oxidhome `a2d47d9`)
+These are what the SDK, the current WIT (`oxidhome:plugin@0.1.0` at oxidhome `85a3ae3`)
 and the host lack for this plugin to run end to end. The plugin doesn't work around any
 of them by changing the WIT. Numbers are kept stable so code comments can refer to them.
 
 ### Sockets and HTTPS (Phase 8)
 
-0. **Closed (8.1).** The SDK has the `streaming-plugin` world: the component exports
-   `setup-pipeline` through `streaming_plugin!`, and the world provides `wasi:sockets`,
-   `wasi:http` and `host-media`. (The release component imports only what it reaches:
-   with camera HTTPS stubbed, the optimizer drops `wasi:http` and `host-media`.)
-1. **Closed (8.1).** The world creates sockets, gated on `[capabilities] network`.
-2. **No broadcast (slice 8.3).** The host refuses broadcast and multicast sends, so the
-   plugin doesn't send the `255.255.255.255:9999` probe. Unicast sweeps
-   (`discovery_targets`) are the fallback, and the only way to find devices until then.
-3. **No interface enumeration (slice 8.3).** The Scrypted plugin sweeps every connected
-   /24. WASI can't list interfaces, so sweep targets come from config.
-4. **No HTTPS to self-signed devices (oxidhome/oxidhome#223).** The host's `wasi:http`
-   serves plain `http://` only, and every camera port is HTTPS with a self-signed
-   certificate. #223 adds HTTPS with trust-on-first-use pinning for LAN devices and an
-   SDK blocking HTTP client; `Net::https` and `Net::https_stream` move onto it then.
-   Until then a camera registers with only what discovery shows: `camera-control@1`
-   (`reboot`, `snapshot`) completes with `err(unavailable)`, and pan-tilt and the
-   spotlight, siren and privacy children never appear, because the probe that finds
-   them needs HTTPS. `setup-pipeline` returns an error string, and talkback has no
-   entry point yet (gap 11).
+0. **Closed (8.1, oxidhome/oxidhome#211).** The SDK has the `streaming-plugin` world:
+   the component exports `setup-pipeline` through `streaming_plugin!`, and the world
+   provides `wasi:sockets`, `wasi:http` and `host-media`.
+1. **Closed (8.1, oxidhome/oxidhome#211).** The world creates sockets, gated on
+   `[capabilities] network`.
+2. **Closed (8.3, oxidhome/oxidhome#231).** Broadcast goes through the host's discovery
+   socket (`oxidhome_sdk::streaming::discovery`), behind a `udp` rule naming
+   `255.255.255.255:9999`. `discovery_targets` stays as a unicast fallback.
+3. **Closed (8.3, oxidhome/oxidhome#231).** `host-network::local-networks` lists the
+   host's networks the grant covers whole; the plugin sends each one's subnet broadcast.
+   (It doesn't unicast-sweep them as the Scrypted plugin does; cameras that ignore
+   broadcast go in `discovery_targets`.)
+4. **Closed (oxidhome/oxidhome#223).** Camera HTTPS runs over `wasi:http`: LINKIE2 and
+   snapshots through the SDK's blocking client, and the live stream through the raw
+   `wasi:http` bindings, since the client buffers whole bodies. The host trusts a
+   camera's self-signed certificate on first use and pins it; for IP-literal URLs only
+   the name check is skipped.
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
    plugin computes both itself and sends them in its own requests, so the password does
    reach plugin memory.
-6. **Closed (8.1).** The host ticks the plugin early when a held socket is readable, so
-   discovery replies no longer wait for the 1 s fallback tick. Each tick, early or not,
-   also runs queued camera commands and due polls. The 3 ms discovery pacing blocks inside a tick, for about
+6. **Closed (oxidhome/oxidhome#224).** The host ticks the plugin early when a held socket
+   (the discovery socket included) is readable, so discovery replies don't wait for the
+   1 s fallback tick. Each tick, early or not, also runs queued camera commands and due
+   polls. The 3 ms pacing of `discovery_targets` probes blocks inside a tick, for about
    190 ms per 64 probes.
 
 ### Media (Phase 9)
@@ -242,8 +246,8 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
 10. **`pipe-writer.write` has no timestamps.** The plugin works around it by writing
     pre-framed RTP from its own packetizer (FU-A, MTU 1400; PCMU 160-sample packets).
     It stamps arrival time, as the Scrypted plugin does. Because the stream is drained
-    per tick, frames that arrive within one tick share a timestamp. Socket wakeups
-    (gap 6) don't cover `wasi:http` bodies yet.
+    per tick, frames that arrive within one tick share a timestamp. Readiness wakeups
+    (gap 6) don't cover `wasi:http` bodies, so the stream is read on the 1 s cadence.
 11. **No outbound audio.** There's no way to receive talkback audio from a consumer (a
     WebRTC client). The 18443 framing is implemented and tested (`protocol::talk`), but
     nothing can feed it.
@@ -277,7 +281,6 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
 - Cache SPS/PPS per camera for a fast stream start, once the pipeline can take it.
 - Energy meters on individual strip outlets (HS300). Needs `context.child_ids` on the
   `emeter` calls.
-- Camera HTTPS over the #223 client (gap 4).
 - Integration tests against `oxidhome-test-host`, which loads `streaming-plugin`
   components.
 - Review round 3 follow-ups:

@@ -11,9 +11,11 @@ use oxidhome_sdk::bindings::oxidhome::plugin::types::Value;
 pub struct Config {
     /// Run UDP discovery at all.
     pub discovery: bool,
-    /// Send the probe to `255.255.255.255`.
+    /// Send the probe to `255.255.255.255` and to each local network's
+    /// subnet broadcast.
     pub broadcast: bool,
-    /// Networks (/24 or narrower) and hosts to sweep with paced unicast.
+    /// Fallback: hosts and networks (/24 or narrower) to probe with paced
+    /// unicast, for devices broadcast doesn't reach.
     pub sweep: Vec<SweepTarget>,
     /// Re-discovery cadence; 0 = only at start.
     pub discovery_interval_ms: u64,

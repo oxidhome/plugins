@@ -10,7 +10,7 @@ use std::rc::Rc;
 use serde_json::{Value as Json, json};
 
 use crate::media::PluginPipeConfig;
-use crate::platform::{ByteStream, Host, Net, NetError, PipeSink};
+use crate::platform::{ByteStream, Host, LocalNetwork, Net, NetError, PipeSink};
 use crate::protocol::http::{HttpRequest, HttpResponse};
 use crate::protocol::{cipher, iot, linkie};
 use oxidhome_sdk::bindings::oxidhome::plugin::devices::{CommandResult, DeviceInfo};
@@ -389,10 +389,12 @@ impl ByteStream for FakeStream {
 pub struct FakeNet {
     pub iot: HashMap<Ipv4Addr, FakeIot>,
     pub cams: HashMap<Ipv4Addr, FakeCam>,
-    /// Discovery replies only to unicast (simulates a host without broadcast).
     pub udp_open: bool,
-    /// Refuse broadcast sends, as the host does before slice 8.3.
+    /// Refuse sends to `255.255.255.255` (no rule names it, or the
+    /// network drops it).
     pub refuse_broadcast: bool,
+    /// The host's interface networks the grant covers.
+    pub local_nets: Vec<LocalNetwork>,
     /// Unicast sends to these fail (the host refused them).
     pub refuse_to: Vec<Ipv4Addr>,
     pub udp_sent: Vec<SocketAddrV4>,
@@ -440,7 +442,7 @@ impl Net for FakeNet {
         let reply = d.handle(&req);
         Ok(iot::encode_frame(&reply.to_string()))
     }
-    fn udp_open(&mut self, _broadcast: bool) -> Result<(), NetError> {
+    fn udp_open(&mut self) -> Result<(), NetError> {
         self.udp_open = true;
         Ok(())
     }
@@ -452,8 +454,23 @@ impl Net for FakeNet {
             return Err(NetError::NotSent("permission denied".into()));
         }
         self.udp_sent.push(to);
+        let subnet = self
+            .local_nets
+            .iter()
+            .find(|n| n.broadcast() == Some(*to.ip()))
+            .copied();
         if to.ip().is_broadcast() {
             let ips: Vec<Ipv4Addr> = self.iot.keys().copied().collect();
+            for ip in ips {
+                self.discovery_reply(ip);
+            }
+        } else if let Some(net) = subnet {
+            let ips: Vec<Ipv4Addr> = self
+                .iot
+                .keys()
+                .copied()
+                .filter(|ip| net.contains((*ip).into()))
+                .collect();
             for ip in ips {
                 self.discovery_reply(ip);
             }
@@ -467,6 +484,9 @@ impl Net for FakeNet {
     }
     fn udp_close(&mut self) {
         self.udp_open = false;
+    }
+    fn local_networks(&mut self) -> Vec<LocalNetwork> {
+        self.local_nets.clone()
     }
     fn https(&mut self, req: &HttpRequest, _timeout_ms: u64) -> Result<HttpResponse, NetError> {
         self.now_ms += self.latency_ms;

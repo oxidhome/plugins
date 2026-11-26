@@ -4,9 +4,9 @@
 //! - [`Host`]: the `OxidHome` host imports the plugin uses (devices,
 //!   events, config, storage, blob-store, logging, media).
 //! - [`Net`]: sockets, HTTPS, clocks and randomness. The real
-//!   implementation ([`crate::wasm::WasiNet`]) runs TCP and the UDP sweep
-//!   over `wasi:sockets` in the `streaming-plugin` world; broadcast waits
-//!   on `OxidHome` slice 8.3 and camera HTTPS on oxidhome/oxidhome#223.
+//!   implementation ([`crate::wasm::WasiNet`]) runs TCP over
+//!   `wasi:sockets`, discovery over the host's discovery socket, and
+//!   camera HTTPS over `wasi:http`, in the `streaming-plugin` world.
 //!
 //! Errors: [`Host`] methods return the host's `error` unchanged; [`Net`]
 //! methods return [`NetError`], split by whether anything was sent.
@@ -19,6 +19,7 @@ use crate::protocol::http::{HttpRequest, HttpResponse};
 use oxidhome_sdk::bindings::oxidhome::plugin::devices::{CommandResult, DeviceInfo};
 use oxidhome_sdk::bindings::oxidhome::plugin::logging::Level;
 use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
+pub use oxidhome_sdk::streaming::discovery::LocalNetwork;
 
 /// The host surface the plugin uses.
 pub trait Host {
@@ -117,17 +118,23 @@ pub trait Net {
         frame: &[u8],
         timeout_ms: u64,
     ) -> Result<Vec<u8>, NetError>;
-    /// Opens the discovery socket (bound to an ephemeral port).
-    fn udp_open(&mut self, broadcast: bool) -> Result<(), NetError>;
+    /// Opens the discovery socket (bound to an ephemeral port). It may
+    /// send to `255.255.255.255` and to subnet broadcasts, as far as the
+    /// granted network rules allow.
+    fn udp_open(&mut self) -> Result<(), NetError>;
     /// Sends one datagram on the discovery socket.
     fn udp_send(&mut self, to: SocketAddrV4, data: &[u8]) -> Result<(), NetError>;
+    /// The host's interface networks that the granted rules cover whole
+    /// (`host-network::local-networks`); their subnet broadcasts reach
+    /// devices on networks where the limited broadcast doesn't.
+    fn local_networks(&mut self) -> Vec<LocalNetwork>;
     /// One received datagram, without blocking.
     fn udp_try_recv(&mut self) -> Option<(Ipv4Addr, Vec<u8>)>;
     /// Closes the discovery socket.
     fn udp_close(&mut self);
-    /// One buffered HTTPS exchange with a camera (self-signed certificate,
-    /// so no verification). Cameras close idle kept-alive sockets, so an
-    /// implementation that pools connections retries once on a stale one.
+    /// One buffered HTTPS exchange with a camera. Cameras have
+    /// self-signed certificates: the host trusts each on first use and
+    /// pins it per address and port.
     fn https(&mut self, req: &HttpRequest, timeout_ms: u64) -> Result<HttpResponse, NetError>;
     /// Opens a streaming HTTPS response: status and headers now, body via
     /// the returned stream.
