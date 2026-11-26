@@ -1295,6 +1295,7 @@ impl<H: Host, N: Net> Kasa<H, N> {
             return false;
         }
         let probe = discovery::probe();
+        let local = self.net.local_networks();
         let mut limited_broadcast = false;
         let mut broadcast_nets: Vec<LocalNetwork> = Vec::new();
         let mut refused = Vec::new();
@@ -1306,10 +1307,10 @@ impl<H: Host, N: Net> Kasa<H, N> {
             }
             // Some networks drop the limited broadcast, and a host with
             // several interfaces sends it on one; the subnet broadcast of
-            // each local network reaches them.
-            // Overlapping networks share a broadcast address: sent once.
+            // each local network reaches them. Overlapping networks share
+            // a broadcast address: it is sent once.
             let mut sent: Vec<(Ipv4Addr, bool)> = Vec::new();
-            for net in self.net.local_networks() {
+            for &net in &local {
                 let Some(ip) = net.broadcast() else { continue };
                 let ok = if let Some(&(_, ok)) = sent.iter().find(|(a, _)| *a == ip) {
                     ok
@@ -1358,8 +1359,22 @@ impl<H: Host, N: Net> Kasa<H, N> {
                 &format!("discovery broadcast refused: {}", refused.join("; ")),
             );
         }
+        // The unicast fallback never reaches a whole network: a target
+        // range wider than a local network holds its broadcast address.
+        let edges: Vec<Ipv4Addr> = local
+            .iter()
+            .filter_map(|n| match (n.address, n.broadcast()) {
+                (std::net::IpAddr::V4(first), Some(last)) => Some([first, last]),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let targets = discovery::sweep_hosts(&self.cfg.sweep)
+            .into_iter()
+            .filter(|ip| !edges.contains(ip))
+            .collect();
         self.sweep = Some(Sweep {
-            targets: discovery::sweep_hosts(&self.cfg.sweep),
+            targets,
             limited_broadcast,
             broadcast_nets,
             probed: HashSet::new(),

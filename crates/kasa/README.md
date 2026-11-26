@@ -17,11 +17,11 @@ This is a port of the [Scrypted Kasa plugin](https://github.com/sv-tools/scrypte
 >   `255.255.255.255` probe and the subnet broadcast of each local network the grant
 >   covers), with `discovery_targets` as a unicast fallback; TCP 9999 to smart-home
 >   devices (polling, commands with H5 outcomes); and camera control and snapshots over
->   HTTPS (LINKIE2 on 10443, snapshots on 19443) through the SDK's `wasi:http` client,
->   which trusts each camera's self-signed certificate on first use. The host checks every
->   send, connect and request against the manifest's network rules. Discovery replies wake
->   the plugin early; every tick, early or on the 1 s fallback cadence, also runs queued
->   camera commands and due polls.
+>   HTTPS (LINKIE2 on 10443, snapshots on 19443) through `wasi:http`, with the host
+>   trusting each camera's self-signed certificate on first use and pinning it. The host
+>   checks every send, connect and request against the manifest's network rules.
+>   Discovery replies wake the plugin early; every tick, early or on the 1 s fallback
+>   cadence, also runs queued camera commands and due polls.
 > - **Waits on Phase 9:** media. `setup-pipeline` is exported and opens the camera's live
 >   stream over HTTPS into `host-media` pipes, but the host doesn't call the export and its
 >   `host-media` answers `unavailable`.
@@ -220,9 +220,9 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    trusts a camera's self-signed certificate on first use and pins it; for IP-literal
    URLs only the name check is skipped. The plugin uses the SDK's `wasi:http` bindings,
    not its blocking client: the client's timeout bounds each phase and each gap between
-   body chunks rather than the whole exchange (a trickling camera could hold a `tick`
-   past the host's watchdog), and it buffers whole bodies, which the live stream doesn't
-   have. One deadline covers each exchange here.
+   body chunks rather than the whole exchange (a trickling camera could hold a `tick` for
+   as long as it trickles, out of the watchdog's reach), and it buffers whole bodies,
+   which the live stream doesn't have. One deadline covers each exchange here.
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
    plugin computes both itself and sends them in its own requests, so the password does

@@ -13,7 +13,8 @@
 //!   blocking client (`oxidhome_sdk::streaming::http`) isn't used: its
 //!   timeout bounds each phase and each gap between body chunks, not the
 //!   whole exchange, so a camera trickling a reply could hold a `tick`
-//!   past the host's watchdog; and it buffers whole bodies, which the
+//!   for as long as it trickles (a call blocked inside the host is out of
+//!   the watchdog's reach); and it buffers whole bodies, which the
 //!   endless live stream doesn't have. Here one deadline covers a whole
 //!   exchange.
 //! - `host-media`: the import is wired, but the host answers
@@ -308,7 +309,12 @@ impl Net for WasiNet {
     fn https(&mut self, req: &HttpRequest, timeout_ms: u64) -> Result<HttpResponse, NetError> {
         let deadline = Instant::now() + ms(timeout_ms);
         let (mut head, body) = start(req, deadline, timeout_ms)?;
-        head.body = body.read_to_end(deadline, max_body(req))?;
+        // An error status is the answer (401 and 403 mean the credentials
+        // were refused); its body isn't needed, and failing to read it
+        // mustn't turn that answer into "maybe sent".
+        if head.status < 400 {
+            head.body = body.read_to_end(deadline, max_body(req))?;
+        }
         Ok(head)
     }
 
@@ -368,7 +374,7 @@ fn http_error(code: &ErrorCode) -> NetError {
     let msg = match code {
         ErrorCode::TlsCertificateError => format!(
             "{code:?}: the host refused the camera's certificate (not the one pinned \
-             at first use, or invalid); the host's audit log says which"
+             at first use, or not valid); a pin mismatch is in the host's audit log"
         ),
         ErrorCode::HttpRequestDenied => {
             format!("{code:?}: no granted network rule allows this camera port")
@@ -412,6 +418,11 @@ impl WasiBody {
         let ready = self.stream.subscribe();
         let mut out = Vec::new();
         loop {
+            // Checked before every read: a camera that keeps a little
+            // data ready would otherwise never hit the empty-read wait.
+            if Instant::now() >= deadline {
+                return Err(sent("timed out reading the answer"));
+            }
             let room = max.saturating_sub(out.len()).saturating_add(1);
             let chunk = match self.stream.read(len(room.min(READ_CHUNK))) {
                 Ok(chunk) => chunk,
@@ -507,10 +518,14 @@ fn start(
         .set_path_with_query(Some(&req.path))
         .map_err(|()| fail("path"))?;
     let nanos = |d: Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
-    let left = nanos(deadline.saturating_duration_since(Instant::now()));
+    let left = deadline.saturating_duration_since(Instant::now());
+    // The host's connect deadline (lookup, connect, TLS) ends a little
+    // before ours, so an unreachable camera fails as `connection-timeout`
+    // (nothing sent) rather than on our deadline (maybe sent).
+    let connect = left.saturating_sub((left / 10).min(Duration::from_millis(500)));
     let options = RequestOptions::new();
-    let _ = options.set_connect_timeout(Some(left));
-    let _ = options.set_first_byte_timeout(Some(left));
+    let _ = options.set_connect_timeout(Some(nanos(connect)));
+    let _ = options.set_first_byte_timeout(Some(nanos(left)));
     let _ = options.set_between_bytes_timeout(Some(nanos(ms(idle_ms))));
     let outgoing = request.body().map_err(|()| fail("body"))?;
     let pending = outgoing_handler::handle(request, Some(options)).map_err(|e| http_error(&e))?;

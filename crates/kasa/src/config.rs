@@ -102,10 +102,8 @@ impl Config {
                 "config discovery_targets: more than {MAX_SWEEP_HOSTS} hosts; each sweep stops at {last}"
             ));
         }
-        c.camera_username =
-            string(get("camera_username"), "camera_username", &mut w).filter(|s| !s.is_empty());
-        c.camera_password =
-            string(get("camera_password"), "camera_password", &mut w).filter(|s| !s.is_empty());
+        c.camera_username = credential(get("camera_username"), "camera_username", &mut w);
+        c.camera_password = credential(get("camera_password"), "camera_password", &mut w);
         c.warnings = w;
         c
     }
@@ -124,6 +122,24 @@ impl Config {
     pub fn in_sweep(&self, ip: Ipv4Addr) -> bool {
         self.sweep.iter().any(|t| t.hosts().any(|h| h == ip))
     }
+}
+
+/// Longest camera username or password accepted, in bytes. Both go into
+/// one `authorization` header, and the host traps a request whose
+/// headers exceed 16 KiB.
+pub const MAX_CREDENTIAL_BYTES: usize = 512;
+
+/// A non-empty credential of at most [`MAX_CREDENTIAL_BYTES`]; the value
+/// never goes into the warning.
+fn credential(v: Option<Value>, key: &str, w: &mut Vec<String>) -> Option<String> {
+    let s = string(v, key, w).filter(|s| !s.is_empty())?;
+    if s.len() > MAX_CREDENTIAL_BYTES {
+        w.push(format!(
+            "config {key}: longer than {MAX_CREDENTIAL_BYTES} bytes; ignored"
+        ));
+        return None;
+    }
+    Some(s)
 }
 
 fn secs_to_ms(s: i64) -> u64 {
@@ -204,6 +220,13 @@ mod tests {
         ]);
         assert_eq!(bad.warnings.len(), 2);
         assert_eq!(bad.camera_password, None);
+        let long = load(&[(
+            "camera_username",
+            Value::StringVal("u".repeat(MAX_CREDENTIAL_BYTES + 1)),
+        )]);
+        assert_eq!(long.camera_username, None);
+        assert_eq!(long.warnings.len(), 1);
+        assert!(!long.warnings[0].contains("uuu"), "{:?}", long.warnings);
         // Five /24s exceed one sweep's host cap: said once, at load.
         let wide = load(&[(
             "discovery_targets",

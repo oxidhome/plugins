@@ -333,6 +333,74 @@ fn subnet_broadcast_finds_devices_on_local_networks() {
     assert!(off.device_id_of("PLUG1").is_none());
 }
 
+/// Overlapping networks share one subnet broadcast; a refused one leaves
+/// its network unheard; and the unicast fallback skips the network and
+/// broadcast addresses of local networks, so it never reaches a whole
+/// network (here with broadcasting off).
+#[test]
+fn subnet_broadcast_edges() {
+    let net = |a: &str, p: u8| LocalNetwork {
+        address: a.parse().unwrap(),
+        prefix_len: p,
+    };
+    let run = |cfg: &[(&str, Value)], nets: Vec<LocalNetwork>, refuse: Vec<Ipv4Addr>| {
+        let mut n = FakeNet {
+            now_ms: 1_000,
+            refuse_broadcast: true,
+            refuse_to: refuse,
+            local_nets: nets,
+            ..FakeNet::default()
+        };
+        n.iot.insert(PLUG, plug());
+        let mut k = Kasa::new(FakeHost::with_config(cfg), n);
+        k.init();
+        for _ in 0..8 {
+            k.tick();
+            k.net.advance(500);
+        }
+        k
+    };
+    let b = |ip: [u8; 4]| SocketAddrV4::new(Ipv4Addr::from(ip), 9999);
+
+    let shared = run(
+        &[],
+        vec![net("192.168.0.0", 23), net("192.168.1.0", 24)],
+        vec![],
+    );
+    assert_eq!(shared.net.udp_sent, [b([192, 168, 1, 255])]);
+    assert!(shared.device_id_of("PLUG1").is_some());
+
+    let refused = run(
+        &[],
+        vec![net("192.168.1.0", 24)],
+        vec![Ipv4Addr::new(192, 168, 1, 255)],
+    );
+    assert_eq!(refused.net.udp_sent, []);
+    assert!(refused.device_id_of("PLUG1").is_none());
+    let warns = refused
+        .host
+        .logs
+        .iter()
+        .filter(|(l, m)| matches!(l, Level::Warn) && m.contains("discovery_targets"))
+        .count();
+    assert_eq!(warns, 1);
+
+    let swept = run(
+        &[
+            ("discovery_broadcast", Value::BoolVal(false)),
+            (
+                "discovery_targets",
+                Value::StringVal("192.168.1.0/24".into()),
+            ),
+        ],
+        vec![net("192.168.1.0", 25)],
+        vec![],
+    );
+    assert_eq!(swept.net.udp_sent.len(), 253);
+    assert!(!swept.net.udp_sent.contains(&b([192, 168, 1, 127])));
+    assert!(swept.device_id_of("PLUG1").is_some());
+}
+
 /// Without the broadcast only hosts a probe went out to were asked, so a
 /// reply from anyone else (outside the targets, not probed yet, or whose
 /// probe failed) is ignored rather than adopted.
