@@ -36,7 +36,7 @@ use oxidhome_sdk::streaming::http::{self, BodyReader, StreamingResponse};
 use oxidhome_sdk::streaming::media::{MediaPipeline as WitPipeline, PipeWriter};
 use oxidhome_sdk::streaming::wasi::clocks::monotonic_clock;
 use oxidhome_sdk::streaming::wasi::http::types::ErrorCode;
-use oxidhome_sdk::streaming::wasi::io::poll::poll;
+use oxidhome_sdk::streaming::wasi::io::poll::{Pollable, poll};
 use oxidhome_sdk::{Plugin, StreamingPlugin, host};
 
 use crate::kasa::Kasa;
@@ -285,7 +285,10 @@ impl Net for WasiNet {
     }
 
     fn https(&mut self, req: &HttpRequest, timeout_ms: u64) -> Result<HttpResponse, NetError> {
+        // One deadline for the exchange, by the clock and by a timer
+        // (either can run ahead of the other on a test host).
         let deadline = Instant::now() + ms(timeout_ms);
+        let timer = monotonic_clock::subscribe_duration(nanos(ms(timeout_ms)));
         // Streamed even though the body is read whole: an error status is
         // the answer (401 and 403 mean the credentials were refused), its
         // body isn't needed, and failing to read it mustn't turn that
@@ -295,7 +298,7 @@ impl Net for WasiNet {
             .map_err(|e| net_error(&e))?;
         let mut head = head(&resp);
         if head.status < 400 {
-            head.body = read_to_end(resp.body(), deadline, max_body(req))?;
+            head.body = read_to_end(resp.body(), &timer, deadline, max_body(req))?;
         }
         Ok(head)
     }
@@ -394,24 +397,31 @@ fn net_error(e: &http::Error) -> NetError {
     }
 }
 
-/// Reads the whole body, at most `max` bytes, by `deadline`: the SDK's
-/// total timeout ends at the head of a streamed response.
-fn read_to_end(body: &mut BodyReader, deadline: Instant, max: usize) -> Result<Vec<u8>, NetError> {
+/// Reads the whole body, at most `max` bytes, before `timer` fires or
+/// `deadline` passes: the SDK's total timeout ends at the head of a
+/// streamed response.
+fn read_to_end(
+    body: &mut BodyReader,
+    timer: &Pollable,
+    deadline: Instant,
+    max: usize,
+) -> Result<Vec<u8>, NetError> {
+    let timed_out = || sent("timed out reading the answer");
     let mut out = Vec::new();
     loop {
         // Checked before every read: a camera that keeps a little data
         // ready would otherwise never reach the wait below.
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(sent("timed out reading the answer"));
+        if timer.ready() || Instant::now() >= deadline {
+            return Err(timed_out());
         }
         let room = max.saturating_sub(out.len()).saturating_add(1);
-        match body.read(room.min(READ_CHUNK)).map_err(|e| net_error(&e))? {
+        // The head has arrived, so a failed body reached the camera.
+        match body.read(room.min(READ_CHUNK)).map_err(sent)? {
             None => return Ok(out),
             Some(chunk) if chunk.is_empty() => {
-                let nanos = u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
-                let timer = monotonic_clock::subscribe_duration(nanos);
-                poll(&[body.pollable(), &timer]);
+                if poll(&[body.pollable(), timer]).contains(&1) {
+                    return Err(timed_out());
+                }
             }
             Some(chunk) if chunk.len() > max - out.len() => {
                 return Err(sent(format!("answer larger than {max} bytes")));
@@ -419,6 +429,10 @@ fn read_to_end(body: &mut BodyReader, deadline: Instant, max: usize) -> Result<V
             Some(chunk) => out.extend_from_slice(&chunk),
         }
     }
+}
+
+fn nanos(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Largest read asked of a response body at once.
@@ -433,7 +447,8 @@ impl ByteStream for WasiBody {
         match self.0.read(max) {
             Ok(Some(data)) => Ok(data),
             Ok(None) => Err(sent("the camera ended the stream")),
-            Err(e) => Err(net_error(&e)),
+            // The head has arrived, so a failed body reached the camera.
+            Err(e) => Err(sent(e)),
         }
     }
 }

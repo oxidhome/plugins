@@ -125,8 +125,8 @@ impl Config {
 }
 
 /// Longest camera username or password accepted, in bytes. Both go into
-/// one `authorization` header, and the host traps a request whose
-/// headers exceed 16 KiB.
+/// one `authorization` header, and the host refuses a request whose
+/// headers exceed 16 KiB (`oxidhome_sdk::streaming::http::MAX_HEADER_BYTES`).
 pub const MAX_CREDENTIAL_BYTES: usize = 512;
 
 /// A non-empty credential of at most [`MAX_CREDENTIAL_BYTES`]; the value
