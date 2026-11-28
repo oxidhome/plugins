@@ -65,7 +65,7 @@ ids are stable across restarts, keyed by the Kasa `deviceId`.
 | | `<id>/outlet-<childId>` | `switch`, named after the outlet's alias |
 | Camera | `<id>` | `video-stream`, `audio-stream`, `camera-control@1`, `status-led@1`, `motion@1` (opt-in), `pan-tilt@1` (when the camera has it) |
 | | `<id>/spotlight` | `switch` (when present) |
-| | `<id>/siren` | `siren` (when present; the camera stops it after its configured duration). A sensitive capability: commanding it needs a role grant naming the `alarm` category |
+| | `<id>/siren` | `siren` (when present; the camera stops it after its configured duration). A sensitive capability: commanding it needs the owner token or a role grant naming the `alarm` category |
 | | `<id>/privacy` | `switch`: on = camera off (video stops for every client) |
 
 Every device carries the metadata `kasa_id`, `kasa_class`, `address` and `mac`.

@@ -293,7 +293,15 @@ impl Net for WasiNet {
         // the answer (401 and 403 mean the credentials were refused), its
         // body isn't needed, and failing to read it mustn't turn that
         // answer into "maybe sent", as `send` would.
-        let mut resp = request(req, ms(timeout_ms), ms(timeout_ms))
+        let request = request(req, ms(timeout_ms));
+        // The head gets what is left of the deadline, so nothing is
+        // dispatched after it.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(not_sent("timed out before sending"));
+        }
+        let mut resp = request
+            .total_timeout(left)
             .send_streaming()
             .map_err(|e| net_error(&e))?;
         let mut head = head(&resp);
@@ -310,7 +318,8 @@ impl Net for WasiNet {
     ) -> Result<(HttpResponse, Box<dyn ByteStream>), NetError> {
         // `timeout` bounds each gap in the endless body; the total timeout
         // covers everything up to the head.
-        let resp = request(req, ms(STREAM_IDLE_TIMEOUT_MS), ms(timeout_ms))
+        let resp = request(req, ms(STREAM_IDLE_TIMEOUT_MS))
+            .total_timeout(ms(timeout_ms))
             .send_streaming()
             .map_err(|e| net_error(&e))?;
         let head = head(&resp);
@@ -348,10 +357,11 @@ fn max_body(req: &HttpRequest) -> usize {
     }
 }
 
-/// `req` for the SDK client. Redirects aren't followed (a camera doesn't
-/// send them, and one would carry the credentials along); the client
-/// drops the headers `wasi:http` refuses and sets `content-length`.
-fn request(req: &HttpRequest, timeout: Duration, total: Duration) -> http::Request {
+/// `req` for the SDK client. Redirects aren't followed: a camera doesn't
+/// send them, and a same-origin one would keep the credentials. The
+/// client drops the headers `wasi:http` refuses and sets
+/// `content-length`.
+fn request(req: &HttpRequest, timeout: Duration) -> http::Request {
     let url = format!("https://{}:{}{}", req.host, req.port, req.path);
     let method = match req.method {
         Method::Get => http::Method::Get,
@@ -361,7 +371,6 @@ fn request(req: &HttpRequest, timeout: Duration, total: Duration) -> http::Reque
         http::Request::new(method, url)
             .body(req.body.clone())
             .timeout(timeout)
-            .total_timeout(total)
             .max_redirects(0),
         |r, (k, v)| r.header(k.as_str(), v.as_bytes()),
     )
@@ -522,7 +531,7 @@ mod tests {
             "uuid",
         );
         assert!(req.header("connection").is_some(), "{req:?}");
-        let built = format!("{:?}", request(&req, ms(1), ms(1)));
+        let built = format!("{:?}", request(&req, ms(1)));
         assert!(built.contains("\"authorization\""), "{built}");
         assert!(!built.contains("\"connection\""), "{built}");
         assert!(built.contains("https://192.168.1.20:10443/"), "{built}");
