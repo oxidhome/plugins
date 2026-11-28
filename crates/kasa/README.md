@@ -11,13 +11,13 @@ This is a port of the [Scrypted Kasa plugin](https://github.com/sv-tools/scrypte
 
 > **Status: plugs, switches, dimmers, bulbs, strips and camera controls work; camera
 > video waits on media.** The component targets the `streaming-plugin` world (`oxidhome`
-> `85a3ae3`):
+> `d558f7d`):
 >
 > - **Works:** discovery by broadcast through the host's discovery socket (the
 >   `255.255.255.255` probe and the subnet broadcast of each local network the grant
 >   covers), with `discovery_targets` as a unicast fallback; TCP 9999 to smart-home
 >   devices (polling, commands with H5 outcomes); and camera control and snapshots over
->   HTTPS (LINKIE2 on 10443, snapshots on 19443) through `wasi:http`, with the host
+>   HTTPS (LINKIE2 on 10443, snapshots on 19443) through the SDK's HTTP client, with the host
 >   trusting each camera's self-signed certificate on first use and pinning it. The host
 >   checks every send, connect and request against the manifest's network rules.
 >   Discovery replies wake the plugin early; every tick, early or on the 1 s fallback
@@ -65,7 +65,7 @@ ids are stable across restarts, keyed by the Kasa `deviceId`.
 | | `<id>/outlet-<childId>` | `switch`, named after the outlet's alias |
 | Camera | `<id>` | `video-stream`, `audio-stream`, `camera-control@1`, `status-led@1`, `motion@1` (opt-in), `pan-tilt@1` (when the camera has it) |
 | | `<id>/spotlight` | `switch` (when present) |
-| | `<id>/siren` | `siren` (when present; the camera stops it after its configured duration). A sensitive capability: commanding it needs the host's `alarm` grant |
+| | `<id>/siren` | `siren` (when present; the camera stops it after its configured duration). A sensitive capability: commanding it needs a role grant naming the `alarm` category |
 | | `<id>/privacy` | `switch`: on = camera off (video stops for every client) |
 
 Every device carries the metadata `kasa_id`, `kasa_class`, `address` and `mac`.
@@ -198,7 +198,7 @@ reuse), nothing more is sent there until discovery finds the device again.
 
 ## Platform gaps
 
-These are what the SDK, the current WIT (`oxidhome:plugin@0.1.0` at oxidhome `85a3ae3`)
+These are what the SDK, the current WIT (`oxidhome:plugin@0.1.0` at oxidhome `d558f7d`)
 and the host lack for this plugin to run end to end. The plugin doesn't work around any
 of them by changing the WIT. Numbers are kept stable so code comments can refer to them.
 
@@ -218,18 +218,17 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    broadcast go in `discovery_targets`.)
 4. **Closed (oxidhome/oxidhome#223).** Camera HTTPS runs over `wasi:http`. The host
    trusts a camera's self-signed certificate on first use and pins it; for IP-literal
-   URLs only the name check is skipped. The plugin uses the SDK's `wasi:http` bindings,
-   not its blocking client: the client's timeout bounds each phase and each gap between
-   body chunks rather than the whole exchange (a trickling camera could hold a `tick` for
-   as long as it trickles, out of the watchdog's reach), and it buffers whole bodies,
-   which the live stream doesn't have. One deadline covers each exchange here.
+   URLs only the name check is skipped. Since oxidhome/oxidhome#242 the plugin uses the
+   SDK's HTTP client: a total timeout bounds each exchange (a trickling camera can't hold
+   a `tick` out of the watchdog's reach), `send_streaming` reads the live stream, and
+   `Error::may_have_reached_server` decides `err` versus `unknown`.
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
    plugin computes both itself and sends them in its own requests, so the password does
    reach plugin memory.
-6. **Closed (oxidhome/oxidhome#224).** The host ticks the plugin early when a held socket
-   (the discovery socket included) is readable, so discovery replies don't wait for the
-   1 s fallback tick. Each tick, early or not, also runs queued camera commands and due
+6. **Closed (oxidhome/oxidhome#224, #242).** The host ticks the plugin early when a held
+   socket (the discovery socket included) or HTTP response body is readable, so discovery
+   replies and live-stream data don't wait for the 1 s fallback tick. Each tick, early or not, also runs queued camera commands and due
    polls. The 3 ms pacing of `discovery_targets` probes blocks inside a tick, for about
    190 ms per 64 probes.
 
@@ -249,9 +248,9 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    `setup-pipeline` and runs until it fails.
 10. **`pipe-writer.write` has no timestamps.** The plugin works around it by writing
     pre-framed RTP from its own packetizer (FU-A, MTU 1400; PCMU 160-sample packets).
-    It stamps arrival time, as the Scrypted plugin does. Because the stream is drained
-    per tick, frames that arrive within one tick share a timestamp. Readiness wakeups
-    (gap 6) don't cover `wasi:http` bodies, so the stream is read on the 1 s cadence.
+    It stamps arrival time, as the Scrypted plugin does. The stream is drained per tick,
+    and stream data wakes the plugin early (gap 6, at most every 100 ms), so frames that
+    arrive within one such tick share a timestamp.
 11. **No outbound audio.** There's no way to receive talkback audio from a consumer (a
     WebRTC client). The 18443 framing is implemented and tested (`protocol::talk`), but
     nothing can feed it.
@@ -315,7 +314,7 @@ Layout:
 | `src/kasa.rs` | Plugin logic over `Host` + `Net`. |
 | `src/mapping.rs` | Device and capability mapping. |
 | `src/media.rs` | Stream session: multipart → RTP → pipes. |
-| `src/wasm.rs` | Component exports through `oxidhome-sdk` (`streaming_plugin!`), and `Host`/`Net` over the SDK host calls, `host-media`, `std::net` (TCP), the discovery socket and `wasi:http`. |
+| `src/wasm.rs` | Component exports through `oxidhome-sdk` (`streaming_plugin!`), and `Host`/`Net` over the SDK host calls, `host-media`, `std::net` (TCP), the discovery socket and the SDK's HTTP client. |
 | `src/fake.rs`, `src/e2e.rs` | Simulated devices and end-to-end tests. |
 | `tests/manifest.rs` | Validates `manifest.toml` with the host's `oxidhome-manifest`. |
 

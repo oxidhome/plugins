@@ -6,7 +6,8 @@
 //! - [`Net`]: sockets, HTTPS, clocks and randomness. The real
 //!   implementation ([`crate::wasm::WasiNet`]) runs TCP over
 //!   `wasi:sockets`, discovery over the host's discovery socket, and
-//!   camera HTTPS over `wasi:http`, in the `streaming-plugin` world.
+//!   camera HTTPS through the SDK's HTTP client, in the `streaming-plugin`
+//!   world.
 //!
 //! Errors: [`Host`] methods return the host's `error` unchanged; [`Net`]
 //! methods return [`NetError`], split by whether anything was sent.

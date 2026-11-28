@@ -8,15 +8,12 @@
 //!   `255.255.255.255` probe and subnet broadcasts; it stays open for the
 //!   listening window, so replies wake the plugin early.
 //! - Camera HTTPS (LINKIE2 on 10443, snapshots and the live stream on
-//!   19443) over the SDK's `wasi:http` bindings. The host trusts each
-//!   camera's self-signed certificate on first use and pins it. The SDK's
-//!   blocking client (`oxidhome_sdk::streaming::http`) isn't used: its
-//!   timeout bounds each phase and each gap between body chunks, not the
-//!   whole exchange, so a camera trickling a reply could hold a `tick`
-//!   for as long as it trickles (a call blocked inside the host is out of
-//!   the watchdog's reach); and it buffers whole bodies, which the
-//!   endless live stream doesn't have. Here one deadline covers a whole
-//!   exchange.
+//!   19443) through the SDK's HTTP client (`oxidhome_sdk::streaming::http`).
+//!   The host trusts each camera's self-signed certificate on first use
+//!   and pins it. One deadline covers a whole exchange (a call blocked
+//!   inside the host is out of the watchdog's reach), and the live
+//!   stream's body reader, kept between calls, wakes the plugin when
+//!   data arrives.
 //! - `host-media`: the import is wired, but the host answers
 //!   `unavailable` until Phase 9.
 //!
@@ -35,15 +32,11 @@ use oxidhome_sdk::bindings::oxidhome::plugin::host_media;
 use oxidhome_sdk::bindings::oxidhome::plugin::logging::{self, Level};
 use oxidhome_sdk::bindings::oxidhome::plugin::types::{Error, KeyValue, Value};
 use oxidhome_sdk::streaming::discovery::{self, DiscoverySocket, LocalNetwork};
+use oxidhome_sdk::streaming::http::{self, BodyReader, StreamingResponse};
 use oxidhome_sdk::streaming::media::{MediaPipeline as WitPipeline, PipeWriter};
 use oxidhome_sdk::streaming::wasi::clocks::monotonic_clock;
-use oxidhome_sdk::streaming::wasi::http::outgoing_handler;
-use oxidhome_sdk::streaming::wasi::http::types::{
-    ErrorCode, Fields, IncomingBody, IncomingResponse, Method as WasiMethod, OutgoingBody,
-    OutgoingRequest, RequestOptions, Scheme, http_error_code,
-};
-use oxidhome_sdk::streaming::wasi::io::poll::{Pollable, poll};
-use oxidhome_sdk::streaming::wasi::io::streams::{InputStream, StreamError};
+use oxidhome_sdk::streaming::wasi::http::types::ErrorCode;
+use oxidhome_sdk::streaming::wasi::io::poll::poll;
 use oxidhome_sdk::{Plugin, StreamingPlugin, host};
 
 use crate::kasa::Kasa;
@@ -54,21 +47,6 @@ use crate::protocol::http::{HttpRequest, HttpResponse, Method};
 use crate::protocol::iot::{FrameDecoder, MAX_FRAME_BYTES};
 use crate::protocol::linkie;
 use crate::protocol::multipart::STREAM_IDLE_TIMEOUT_MS;
-
-/// Headers `wasi:http` refuses from a guest (hop-by-hop, or set by the
-/// host), and `content-length`, which is set from the body.
-const HOST_SET_HEADERS: [&str; 10] = [
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "proxy-connection",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "http2-settings",
-    "content-length",
-];
 
 // ── Host ─────────────────────────────────────────────────────────────────
 
@@ -308,12 +286,16 @@ impl Net for WasiNet {
 
     fn https(&mut self, req: &HttpRequest, timeout_ms: u64) -> Result<HttpResponse, NetError> {
         let deadline = Instant::now() + ms(timeout_ms);
-        let (mut head, body) = start(req, deadline, timeout_ms)?;
-        // An error status is the answer (401 and 403 mean the credentials
-        // were refused); its body isn't needed, and failing to read it
-        // mustn't turn that answer into "maybe sent".
+        // Streamed even though the body is read whole: an error status is
+        // the answer (401 and 403 mean the credentials were refused), its
+        // body isn't needed, and failing to read it mustn't turn that
+        // answer into "maybe sent", as `send` would.
+        let mut resp = request(req, ms(timeout_ms), ms(timeout_ms))
+            .send_streaming()
+            .map_err(|e| net_error(&e))?;
+        let mut head = head(&resp);
         if head.status < 400 {
-            head.body = body.read_to_end(deadline, max_body(req))?;
+            head.body = read_to_end(resp.body(), deadline, max_body(req))?;
         }
         Ok(head)
     }
@@ -323,9 +305,13 @@ impl Net for WasiNet {
         req: &HttpRequest,
         timeout_ms: u64,
     ) -> Result<(HttpResponse, Box<dyn ByteStream>), NetError> {
-        let deadline = Instant::now() + ms(timeout_ms);
-        let (head, body) = start(req, deadline, STREAM_IDLE_TIMEOUT_MS)?;
-        Ok((head, Box::new(body)))
+        // `timeout` bounds each gap in the endless body; the total timeout
+        // covers everything up to the head.
+        let resp = request(req, ms(STREAM_IDLE_TIMEOUT_MS), ms(timeout_ms))
+            .send_streaming()
+            .map_err(|e| net_error(&e))?;
+        let head = head(&resp);
+        Ok((head, Box::new(WasiBody(resp.into_body()))))
     }
 
     fn monotonic_ms(&self) -> u64 {
@@ -359,224 +345,97 @@ fn max_body(req: &HttpRequest) -> usize {
     }
 }
 
-/// The request's headers without those the host sets or refuses.
-fn guest_headers(req: &HttpRequest) -> impl Iterator<Item = (&str, &str)> {
-    req.headers
-        .iter()
-        .filter(|(k, _)| !HOST_SET_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)))
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+/// `req` for the SDK client. Redirects aren't followed (a camera doesn't
+/// send them, and one would carry the credentials along); the client
+/// drops the headers `wasi:http` refuses and sets `content-length`.
+fn request(req: &HttpRequest, timeout: Duration, total: Duration) -> http::Request {
+    let url = format!("https://{}:{}{}", req.host, req.port, req.path);
+    let method = match req.method {
+        Method::Get => http::Method::Get,
+        Method::Post => http::Method::Post,
+    };
+    req.headers.iter().fold(
+        http::Request::new(method, url)
+            .body(req.body.clone())
+            .timeout(timeout)
+            .total_timeout(total)
+            .max_redirects(0),
+        |r, (k, v)| r.header(k.as_str(), v.as_bytes()),
+    )
 }
 
-/// Whether a `wasi:http` failure may have reached the camera: failures
-/// before or during the connection and TLS handshake didn't, the rest
-/// (a timeout waiting for the answer, a cut connection) may have.
-fn http_error(code: &ErrorCode) -> NetError {
-    let msg = match code {
-        ErrorCode::TlsCertificateError => format!(
-            "{code:?}: the host refused the camera's certificate (not the one pinned \
-             at first use, or not valid); a pin mismatch is in the host's audit log"
-        ),
-        ErrorCode::HttpRequestDenied => {
-            format!("{code:?}: no granted network rule allows this camera port")
-        }
-        _ => format!("{code:?}"),
-    };
-    match code {
-        ErrorCode::DnsTimeout
-        | ErrorCode::DnsError(_)
-        | ErrorCode::DestinationNotFound
-        | ErrorCode::DestinationUnavailable
-        | ErrorCode::DestinationIpProhibited
-        | ErrorCode::DestinationIpUnroutable
-        | ErrorCode::ConnectionRefused
-        | ErrorCode::ConnectionTimeout
-        | ErrorCode::ConnectionLimitReached
-        | ErrorCode::TlsProtocolError
-        | ErrorCode::TlsCertificateError
-        | ErrorCode::TlsAlertReceived(_)
-        | ErrorCode::HttpRequestDenied
-        | ErrorCode::HttpRequestMethodInvalid
-        | ErrorCode::HttpRequestUriInvalid
-        | ErrorCode::HttpRequestUriTooLong
-        | ErrorCode::HttpRequestHeaderSectionSize(_)
-        | ErrorCode::HttpRequestHeaderSize(_) => NetError::NotSent(msg),
-        _ => NetError::Sent(msg),
+/// The response head, its body not read.
+fn head(resp: &StreamingResponse) -> HttpResponse {
+    HttpResponse {
+        status: resp.status(),
+        headers: resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.clone(), String::from_utf8_lossy(v).into_owned()))
+            .collect(),
+        body: Vec::new(),
     }
 }
 
-/// A response body. Fields drop in order: the stream before the body it
-/// came from, the body before its response.
-struct WasiBody {
-    stream: InputStream,
-    _body: IncomingBody,
-    _response: IncomingResponse,
+/// An SDK client failure, split by whether it may have reached the camera.
+fn net_error(e: &http::Error) -> NetError {
+    let msg = match e {
+        http::Error::Http(ErrorCode::TlsCertificateError) => format!(
+            "{e}: the host refused the camera's certificate (not the one pinned at \
+             first use, or not valid); a pin mismatch is in the host's audit log"
+        ),
+        _ if e.is_denied() => format!("{e}: no granted network rule allows this camera port"),
+        _ => e.to_string(),
+    };
+    if e.may_have_reached_server() {
+        NetError::Sent(msg)
+    } else {
+        NetError::NotSent(msg)
+    }
 }
 
-impl WasiBody {
-    /// Reads the whole body, at most `max` bytes, by `deadline`.
-    fn read_to_end(&self, deadline: Instant, max: usize) -> Result<Vec<u8>, NetError> {
-        let ready = self.stream.subscribe();
-        let mut out = Vec::new();
-        loop {
-            // Checked before every read: a camera that keeps a little
-            // data ready would otherwise never hit the empty-read wait.
-            if Instant::now() >= deadline {
-                return Err(sent("timed out reading the answer"));
+/// Reads the whole body, at most `max` bytes, by `deadline`: the SDK's
+/// total timeout ends at the head of a streamed response.
+fn read_to_end(body: &mut BodyReader, deadline: Instant, max: usize) -> Result<Vec<u8>, NetError> {
+    let mut out = Vec::new();
+    loop {
+        // Checked before every read: a camera that keeps a little data
+        // ready would otherwise never reach the wait below.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(sent("timed out reading the answer"));
+        }
+        let room = max.saturating_sub(out.len()).saturating_add(1);
+        match body.read(room.min(READ_CHUNK)).map_err(|e| net_error(&e))? {
+            None => return Ok(out),
+            Some(chunk) if chunk.is_empty() => {
+                let nanos = u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
+                let timer = monotonic_clock::subscribe_duration(nanos);
+                poll(&[body.pollable(), &timer]);
             }
-            let room = max.saturating_sub(out.len()).saturating_add(1);
-            let chunk = match self.stream.read(len(room.min(READ_CHUNK))) {
-                Ok(chunk) => chunk,
-                Err(StreamError::Closed) => return Ok(out),
-                Err(StreamError::LastOperationFailed(e)) => return Err(stream_failed(&e)),
-            };
-            if chunk.is_empty() {
-                if !wait(&ready, deadline) {
-                    return Err(sent("timed out reading the answer"));
-                }
-                continue;
-            }
-            if chunk.len() > max - out.len() {
+            Some(chunk) if chunk.len() > max - out.len() => {
                 return Err(sent(format!("answer larger than {max} bytes")));
             }
-            out.extend_from_slice(&chunk);
+            Some(chunk) => out.extend_from_slice(&chunk),
         }
     }
 }
+
+/// Largest read asked of a response body at once.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// The live stream's body. Kept between calls, it wakes the plugin when
+/// data (or the end) arrives.
+struct WasiBody(BodyReader);
 
 impl ByteStream for WasiBody {
     fn read_available(&mut self, max: usize) -> Result<Vec<u8>, NetError> {
-        match self.stream.read(len(max)) {
-            Ok(data) => Ok(data),
-            Err(StreamError::Closed) => Err(sent("the camera ended the stream")),
-            Err(StreamError::LastOperationFailed(e)) => Err(stream_failed(&e)),
+        match self.0.read(max) {
+            Ok(Some(data)) => Ok(data),
+            Ok(None) => Err(sent("the camera ended the stream")),
+            Err(e) => Err(net_error(&e)),
         }
     }
-}
-
-fn len(n: usize) -> u64 {
-    u64::try_from(n).unwrap_or(u64::MAX)
-}
-
-/// A response body that failed after the request went out.
-fn stream_failed(e: &oxidhome_sdk::streaming::wasi::io::error::Error) -> NetError {
-    match http_error_code(e) {
-        Some(code) => sent(format!("{code:?}")),
-        None => sent(e.to_debug_string()),
-    }
-}
-
-/// Largest read asked of a response stream at once.
-const READ_CHUNK: usize = 64 * 1024;
-/// Largest write `wasi:io` takes at once.
-const WRITE_CHUNK: usize = 4096;
-
-/// Waits until `pollable` is ready or `deadline` passes; `false` on the
-/// deadline.
-fn wait(pollable: &Pollable, deadline: Instant) -> bool {
-    let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-        return false;
-    }
-    let timer =
-        monotonic_clock::subscribe_duration(u64::try_from(left.as_nanos()).unwrap_or(u64::MAX));
-    poll(&[pollable, &timer]).contains(&0)
-}
-
-/// Sends `req` and waits for the response head, all by `deadline`. The
-/// host also ends the body after `idle_ms` without data.
-fn start(
-    req: &HttpRequest,
-    deadline: Instant,
-    idle_ms: u64,
-) -> Result<(HttpResponse, WasiBody), NetError> {
-    let fail = |what: &str| not_sent(format!("invalid {what}"));
-    let headers = Fields::new();
-    for (name, value) in guest_headers(req) {
-        headers
-            .append(&name.to_ascii_lowercase(), value.as_bytes())
-            .map_err(|e| not_sent(format!("header `{name}`: {e:?}")))?;
-    }
-    if req.method == Method::Post || !req.body.is_empty() {
-        headers
-            .append("content-length", req.body.len().to_string().as_bytes())
-            .map_err(|e| not_sent(format!("content-length: {e:?}")))?;
-    }
-    let request = OutgoingRequest::new(headers);
-    request
-        .set_method(&match req.method {
-            Method::Get => WasiMethod::Get,
-            Method::Post => WasiMethod::Post,
-        })
-        .map_err(|()| fail("method"))?;
-    request
-        .set_scheme(Some(&Scheme::Https))
-        .map_err(|()| fail("scheme"))?;
-    request
-        .set_authority(Some(&format!("{}:{}", req.host, req.port)))
-        .map_err(|()| fail("authority"))?;
-    request
-        .set_path_with_query(Some(&req.path))
-        .map_err(|()| fail("path"))?;
-    let nanos = |d: Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
-    let left = deadline.saturating_duration_since(Instant::now());
-    // The host's connect deadline (lookup, connect, TLS) ends a little
-    // before ours, so an unreachable camera fails as `connection-timeout`
-    // (nothing sent) rather than on our deadline (maybe sent).
-    let connect = left.saturating_sub((left / 10).min(Duration::from_millis(500)));
-    let options = RequestOptions::new();
-    let _ = options.set_connect_timeout(Some(nanos(connect)));
-    let _ = options.set_first_byte_timeout(Some(nanos(left)));
-    let _ = options.set_between_bytes_timeout(Some(nanos(ms(idle_ms))));
-    let outgoing = request.body().map_err(|()| fail("body"))?;
-    let pending = outgoing_handler::handle(request, Some(options)).map_err(|e| http_error(&e))?;
-    // Written after `handle`: the host buffers what is written before the
-    // connection is up (two 16 KiB writes), and the camera bodies are a
-    // few hundred bytes. A failed write fails the request, which the
-    // response below reports.
-    if let Ok(stream) = outgoing.write() {
-        for chunk in req.body.chunks(WRITE_CHUNK) {
-            if stream.blocking_write_and_flush(chunk).is_err() {
-                break;
-            }
-        }
-    }
-    let _ = OutgoingBody::finish(outgoing, None);
-    {
-        let ready = pending.subscribe();
-        if !wait(&ready, deadline) {
-            // Possibly sent: the connection may be up by now.
-            return Err(sent("timed out waiting for the answer"));
-        }
-    }
-    let response = pending
-        .get()
-        .ok_or_else(|| sent("response not ready"))?
-        .map_err(|()| sent("response already taken"))?
-        .map_err(|e| http_error(&e))?;
-    let head = HttpResponse {
-        status: response.status(),
-        headers: response
-            .headers()
-            .entries()
-            .into_iter()
-            .map(|(k, v)| (k, String::from_utf8_lossy(&v).into_owned()))
-            .collect(),
-        body: Vec::new(),
-    };
-    let body = response
-        .consume()
-        .map_err(|()| sent("response body already taken"))?;
-    let stream = body
-        .stream()
-        .map_err(|()| sent("response stream already taken"))?;
-    Ok((
-        head,
-        WasiBody {
-            stream,
-            _body: body,
-            _response: response,
-        },
-    ))
 }
 
 // ── Exports ──────────────────────────────────────────────────────────────
@@ -625,7 +484,7 @@ mod tests {
     use crate::protocol::camera;
 
     #[test]
-    fn requests_drop_headers_the_host_sets() {
+    fn bodies_are_bounded_per_endpoint() {
         let req = linkie::build_request(
             "192.168.1.20",
             linkie::LINKIE_PORT,
@@ -633,27 +492,39 @@ mod tests {
             &linkie::LinkieRequest::new(),
             "uuid",
         );
-        let names: Vec<String> = guest_headers(&req)
-            .map(|(k, _)| k.to_ascii_lowercase())
-            .collect();
-        assert!(names.contains(&"authorization".to_string()), "{names:?}");
-        for dropped in ["connection", "content-length", "host"] {
-            assert!(!names.contains(&dropped.to_string()), "{names:?}");
-        }
         assert_eq!(max_body(&req), linkie::MAX_REPLY_BYTES);
         let snap = camera::snapshot_request("192.168.1.20", camera::STREAM_PORT, "Basic y");
         assert_eq!(max_body(&snap), SNAPSHOT_MAX_BYTES);
     }
 
     #[test]
-    fn http_errors_split_by_whether_the_request_went_out() {
+    fn requests_keep_credentials_and_drop_hop_by_hop_headers() {
+        let req = linkie::build_request(
+            "192.168.1.20",
+            linkie::LINKIE_PORT,
+            "Basic x",
+            &linkie::LinkieRequest::new(),
+            "uuid",
+        );
+        assert!(req.header("connection").is_some(), "{req:?}");
+        let built = format!("{:?}", request(&req, ms(1), ms(1)));
+        assert!(built.contains("\"authorization\""), "{built}");
+        assert!(!built.contains("\"connection\""), "{built}");
+        assert!(built.contains("https://192.168.1.20:10443/"), "{built}");
+        assert!(built.contains("max_redirects: 0"), "{built}");
+    }
+
+    #[test]
+    fn errors_split_by_whether_the_request_went_out() {
+        let http = |code| net_error(&http::Error::Http(code));
         for code in [
             ErrorCode::ConnectionRefused,
             ErrorCode::ConnectionTimeout,
+            ErrorCode::TlsProtocolError,
             ErrorCode::TlsCertificateError,
             ErrorCode::HttpRequestDenied,
         ] {
-            assert!(!http_error(&code).maybe_sent(), "{code:?}");
+            assert!(!http(code.clone()).maybe_sent(), "{code:?}");
         }
         for code in [
             ErrorCode::ConnectionReadTimeout,
@@ -661,12 +532,25 @@ mod tests {
             ErrorCode::HttpResponseTimeout,
             ErrorCode::InternalError(None),
         ] {
-            assert!(http_error(&code).maybe_sent(), "{code:?}");
+            assert!(http(code.clone()).maybe_sent(), "{code:?}");
         }
         assert!(
-            http_error(&ErrorCode::TlsCertificateError)
+            http(ErrorCode::TlsCertificateError)
                 .message()
                 .contains("pinned")
         );
+        assert!(
+            http(ErrorCode::HttpRequestDenied)
+                .message()
+                .contains("network rule")
+        );
+        let timeout = |dispatched| {
+            net_error(&http::Error::TotalTimeout {
+                limit: ms(1),
+                dispatched,
+            })
+        };
+        assert!(!timeout(false).maybe_sent());
+        assert!(timeout(true).maybe_sent());
     }
 }

@@ -22,9 +22,10 @@ wasm = "oxidhome_kasa_plugin.wasm"
 # One instance owns the LAN's Kasa devices; two would fight over them.
 singleton = true
 # Polls, accepted camera commands, motion reads and the live stream
-# advance on tick. Discovery replies wake the plugin early (at least
-# 100 ms after the previous tick); camera stream bodies don't, so this
-# stays at 1 s.
+# advance on tick. Discovery replies and live-stream data wake the
+# plugin early (at least 100 ms after the previous tick); this cadence is
+# for the rest: smart-home polls (16 per tick) and accepted camera
+# commands, which run on the next tick.
 tick_interval_ms = 1000
 
 [capabilities]

@@ -45,8 +45,8 @@ unused_dependencies = "deny"
 # `["streaming-plugin"]`). Cargo unifies features across the packages of
 # one build, and a wasm build with both worlds fails, so wasm builds and
 # checks run per package (`-p <package>`), never `--workspace`.
-oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "85a3ae3bbc426260f7fd308d1fde97268cf6d1c3", default-features = false }
-oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "85a3ae3bbc426260f7fd308d1fde97268cf6d1c3" }
+oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "d558f7d53eaf78184bf26697f019d3d7e1e272fc", default-features = false }
+oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "d558f7d53eaf78184bf26697f019d3d7e1e272fc" }
 # Test-only: parses `manifest.toml` the way the host does. Same version
 # as oxidhome/oxidhome so the lockfile keeps one copy.
 toml = { version = "1.1.2", default-features = false, features = ["parse", "serde", "std"] }
