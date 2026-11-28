@@ -25,7 +25,7 @@ singleton = true
 # advance on tick. Discovery replies and live-stream data wake the
 # plugin early (at least 100 ms after the previous tick); this cadence is
 # for the rest: smart-home polls (16 per tick) and accepted camera
-# commands, which run on the next tick.
+# commands, which run from the next tick on, as the tick budget allows.
 tick_interval_ms = 1000
 
 [capabilities]

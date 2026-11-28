@@ -297,7 +297,7 @@ impl Net for WasiNet {
         // The head gets what is left of the deadline, so nothing is
         // dispatched after it.
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        if left.is_zero() || timer.ready() {
             return Err(not_sent("timed out before sending"));
         }
         let mut resp = request

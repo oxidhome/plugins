@@ -249,8 +249,8 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
 10. **`pipe-writer.write` has no timestamps.** The plugin works around it by writing
     pre-framed RTP from its own packetizer (FU-A, MTU 1400; PCMU 160-sample packets).
     It stamps arrival time, as the Scrypted plugin does. The stream is drained per tick,
-    and stream data wakes the plugin early (gap 6, at most every 100 ms), so frames that
-    arrive within one such tick share a timestamp.
+    and stream data wakes the plugin early (gap 6, at most every 100 ms), so video frames
+    that arrive within one such tick share a timestamp (audio advances by sample count).
 11. **No outbound audio.** There's no way to receive talkback audio from a consumer (a
     WebRTC client). The 18443 framing is implemented and tested (`protocol::talk`), but
     nothing can feed it.
