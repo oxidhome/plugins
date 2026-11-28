@@ -534,7 +534,12 @@ mod tests {
         let built = format!("{:?}", request(&req, ms(1)));
         assert!(built.contains("\"authorization\""), "{built}");
         assert!(!built.contains("\"connection\""), "{built}");
-        assert!(built.contains("https://192.168.1.20:10443/"), "{built}");
+        let url = format!("\"https://192.168.1.20:10443{}\"", linkie::LINKIE_PATH);
+        assert!(built.contains(&url), "{built}");
+        assert!(built.contains("method: Post"), "{built}");
+        assert_ne!(req.body.len(), 0);
+        let body_len = format!("body_len: {}", req.body.len());
+        assert!(built.contains(&body_len), "{built}");
         assert!(built.contains("max_redirects: 0"), "{built}");
     }
 
