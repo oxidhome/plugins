@@ -1,0 +1,121 @@
+manifest_version = 1
+
+[plugin]
+id = "oxidhome.kasa"
+name = "TP-Link Kasa"
+version = "0.1.0"
+authors = ["The OxidHome Contributors"]
+description = "TP-Link Kasa plugs, switches, dimmers, bulbs, power strips and cameras on the local network."
+source = "https://github.com/oxidhome/plugins/tree/main/crates/kasa"
+license = "MIT OR Apache-2.0"
+keywords = ["kasa", "tp-link", "plug", "bulb", "camera"]
+# Sockets (TCP/UDP 9999), the discovery socket, and HTTPS to cameras;
+# see README.md, "Platform gaps", for what the host still lacks.
+world = "streaming-plugin"
+# Version of the pinned `oxidhome-sdk` crate (`cargo pkgid oxidhome-sdk`).
+sdk_version = "0.1.0"
+
+[runtime]
+# Relative to the install directory, which holds this manifest and the
+# built component side by side.
+wasm = "oxidhome_kasa_plugin.wasm"
+# One instance owns the LAN's Kasa devices; two would fight over them.
+singleton = true
+# Polls, accepted camera commands, motion reads and the live stream
+# advance on tick. Discovery replies and live-stream data wake the
+# plugin early (at least 100 ms after the previous tick); this cadence is
+# for the rest: smart-home polls (16 per tick) and accepted camera
+# commands, which run from the next tick on, as the tick budget allows.
+tick_interval_ms = 1000
+
+[capabilities]
+# Kasa devices only live on the local network; the private ranges are
+# the narrowest rules that fit any LAN, and the owner can narrow them to
+# the real subnet at install.
+# - UDP 9999: the probe to 255.255.255.255 (a broadcast needs a rule
+#   naming it), and the private ranges for the replies, the subnet
+#   broadcast of each local network the grant covers whole, and the
+#   unicast `discovery_targets`.
+# - TCP 9999: plugs, switches, dimmers, bulbs and strips.
+# - HTTPS 10443: camera control (LINKIE2); HTTPS 19443: snapshots and
+#   the live stream. Cameras use self-signed certificates, which the host
+#   trusts on first use and pins.
+# Two-way audio (HTTPS 18443) isn't requested: nothing can feed it yet.
+network = [
+  "udp://255.255.255.255:9999",
+  "udp://10.0.0.0/8:9999",
+  "udp://172.16.0.0/12:9999",
+  "udp://192.168.0.0/16:9999",
+  "tcp://10.0.0.0/8:9999",
+  "tcp://172.16.0.0/12:9999",
+  "tcp://192.168.0.0/16:9999",
+  "https://10.0.0.0/8:10443",
+  "https://172.16.0.0/12:10443",
+  "https://192.168.0.0/16:10443",
+  "https://10.0.0.0/8:19443",
+  "https://172.16.0.0/12:19443",
+  "https://192.168.0.0/16:19443",
+]
+# The adopted-device index plus one record per device (a few hundred
+# bytes; up to ~2 KB for a strip), for up to 256 devices.
+storage_quota_kb = 512
+# One snapshot per camera (~100 KB each), overwritten in place.
+blob_quota_mb = 16
+declares_devices = [
+  "switch",
+  "dimmer",
+  "color-light",
+  "sensor",
+  "siren",
+  "video-stream",
+  "audio-stream",
+  "extension(dev.oxidhome.kasa/status-led@1)",
+  "extension(dev.oxidhome.kasa/energy-meter@1)",
+  "extension(dev.oxidhome.kasa/motion@1)",
+  "extension(dev.oxidhome.kasa/pan-tilt@1)",
+  "extension(dev.oxidhome.kasa/camera-control@1)",
+]
+
+[config.discovery]
+type = "bool"
+default = true
+description = "Find devices with the UDP probe on port 9999: broadcast, plus discovery_targets."
+
+[config.discovery_broadcast]
+type = "bool"
+default = true
+description = "Broadcast the probe to 255.255.255.255 and to each local network the grant covers."
+
+[config.discovery_targets]
+type = "string"
+default = ""
+description = "Fallback for devices broadcast misses: comma-separated addresses (or networks, /24 or narrower) to probe one by one, e.g. \"10.0.0.7, 192.168.2.0/24\"."
+
+[config.discovery_interval_s]
+type = "int"
+default = 300
+min = 0
+max = 86400
+description = "Seconds between discovery runs; 0 runs it only at start. Values under 60 count as 60."
+
+[config.poll_interval_s]
+type = "int"
+default = 30
+min = 5
+max = 3600
+description = "Seconds between state polls of each device."
+
+[config.camera_username]
+type = "string"
+default = ""
+description = "Kasa account email. Cameras authenticate local requests with the cloud account."
+
+[config.camera_password]
+type = "secret"
+required = false
+description = "Kasa account password. Needed for camera control, snapshots and video; plugs and bulbs work without it."
+
+[config.camera_motion]
+type = "bool"
+default = false
+description = "Poll each camera's own motion detection once a second and publish it."

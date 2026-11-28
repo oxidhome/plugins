@@ -9,10 +9,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+
+[[package]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
+name = "cfg-if"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "crypto-common"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
+dependencies = [
+ "generic-array",
+ "typenum",
+]
+
+[[package]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+]
 
 [[package]]
 name = "equivalent"
@@ -25,6 +66,16 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "generic-array"
+version = "0.14.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+dependencies = [
+ "typenum",
+ "version_check",
+]
 
 [[package]]
 name = "hashbrown"
@@ -98,6 +149,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -110,9 +171,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "oxidhome-kasa-plugin"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "md-5",
+ "oxidhome-manifest",
+ "oxidhome-sdk",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "oxidhome-manifest"
 version = "0.1.0"
-source = "git+https://github.com/oxidhome/oxidhome?rev=bcbdb926622b757d734952e53d8c70b66550c0a3#bcbdb926622b757d734952e53d8c70b66550c0a3"
+source = "git+https://github.com/oxidhome/oxidhome?rev=d558f7d53eaf78184bf26697f019d3d7e1e272fc#d558f7d53eaf78184bf26697f019d3d7e1e272fc"
 dependencies = [
  "ipnet",
  "semver",
@@ -124,7 +197,7 @@ dependencies = [
 [[package]]
 name = "oxidhome-sdk"
 version = "0.1.0"
-source = "git+https://github.com/oxidhome/oxidhome?rev=bcbdb926622b757d734952e53d8c70b66550c0a3#bcbdb926622b757d734952e53d8c70b66550c0a3"
+source = "git+https://github.com/oxidhome/oxidhome?rev=d558f7d53eaf78184bf26697f019d3d7e1e272fc#d558f7d53eaf78184bf26697f019d3d7e1e272fc"
 dependencies = [
  "oxidhome-wit",
  "serde",
@@ -145,7 +218,7 @@ dependencies = [
 [[package]]
 name = "oxidhome-wit"
 version = "0.1.0"
-source = "git+https://github.com/oxidhome/oxidhome?rev=bcbdb926622b757d734952e53d8c70b66550c0a3#bcbdb926622b757d734952e53d8c70b66550c0a3"
+source = "git+https://github.com/oxidhome/oxidhome?rev=d558f7d53eaf78184bf26697f019d3d7e1e272fc#d558f7d53eaf78184bf26697f019d3d7e1e272fc"
 dependencies = [
  "wit-bindgen",
 ]
@@ -347,10 +420,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "wasm-encoder"

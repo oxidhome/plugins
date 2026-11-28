@@ -46,11 +46,20 @@ Workspace conventions, matching `oxidhome/oxidhome`:
 Plugins build on `oxidhome-sdk`, which brings in the WIT bindings (`oxidhome:plugin@0.1.0`) through `oxidhome-wit`. The SDK is not on crates.io yet, so the root `Cargo.toml` takes it from git, pinned to one `oxidhome/oxidhome` commit:
 
 ```toml
-oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "<commit>" }
+oxidhome-sdk = { git = "https://github.com/oxidhome/oxidhome", rev = "<commit>", default-features = false }
 oxidhome-manifest = { git = "https://github.com/oxidhome/oxidhome", rev = "<commit>" }
 ```
 
 `oxidhome-manifest` is the host's manifest parser and validator; plugins use it as a dev-dependency to test their `manifest.toml`. Both entries must name the same commit.
+
+The SDK binds one plugin world per build, picked by feature, so each plugin names its world in its own `Cargo.toml`, matching `world` in its `manifest.toml`:
+
+```toml
+oxidhome-sdk = { workspace = true, features = ["plugin"] }           # world = "plugin"
+oxidhome-sdk = { workspace = true, features = ["streaming-plugin"] } # world = "streaming-plugin"
+```
+
+Cargo unifies features across the packages of one invocation, and a build with both worlds fails, so build and check one package at a time (`-p <package>`), never `--workspace`. [`.github/each-package.sh`](.github/each-package.sh) runs a cargo subcommand once per member, which is what CI does.
 
 Don't add `wit-bindgen` or a copy of the WIT files to a plugin. `oxidhome-wit` pins `wit-bindgen` to an exact version, and going through the SDK keeps every plugin on the bindings the host was tested with.
 
@@ -78,11 +87,11 @@ Run what CI runs:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-features --all-targets -- -D warnings
-cargo clippy --target wasm32-wasip2 --all-features --lib -- -D warnings
-cargo nextest run --all-features --all-targets
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-cargo build --workspace --target wasm32-wasip2 --locked
+.github/each-package.sh clippy --all-features --all-targets -- -D warnings
+.github/each-package.sh clippy --target wasm32-wasip2 --all-features --lib -- -D warnings
+.github/each-package.sh nextest run --all-features --all-targets --no-tests=pass
+RUSTDOCFLAGS="-D warnings" .github/each-package.sh doc --all-features --no-deps
+.github/each-package.sh build --target wasm32-wasip2 --locked
 cargo machete
 cargo deny check all
 ```
@@ -150,7 +159,7 @@ Plugins declare what they need in `manifest.toml`. Capability-gated host calls (
 ```toml
 [capabilities]
 # Outbound network rules: proto://host[:port], with CIDRs and wildcards.
-# Parsed and validated today; see the note below before relying on them.
+# Only the streaming worlds may declare them; see below.
 network = ["udp://192.168.0.0/16:9999", "tcp://192.168.0.0/16:9999"]
 storage_quota_kb = 64              # KV storage; 0 or absent = no storage
 declares_devices = ["switch", "sensor"]
@@ -165,7 +174,7 @@ type = "secret"                    # never has a default
 description = "Cloud account password."
 ```
 
-The standard `plugin` world, which is what the SDK builds today, has no raw I/O: no sockets, and the host leaves WASI networking off. `network` rules are parsed and validated at install, but they only grant access in the socket-capable `streaming-plugin` worlds, which the host doesn't load yet. A plugin that has to talk to devices on the LAN can't do it from the `plugin` world.
+The standard `plugin` world has no raw I/O: no sockets, and the host leaves WASI networking off, so validation refuses `network` rules on a `plugin` (or `ai-plugin`) manifest; only `streaming-plugin` and `streaming-ai-plugin` may declare them. A plugin that talks to devices targets `streaming-plugin` (the SDK's `streaming-plugin` feature, `StreamingPlugin` and `streaming_plugin!`): `std::net` sockets and outgoing `wasi:http` work there, and the host checks every connect, send, name lookup and HTTP request against the granted rules, on the resolved address. LAN addresses need an IP or CIDR rule, or a name under `.local`, `.lan`, `.home.arpa` or `.internal`. Broadcast and multicast go through the SDK's discovery socket (`oxidhome_sdk::streaming::discovery`): `255.255.255.255` and multicast groups need a `udp` rule naming the address, and a subnet broadcast a `udp` rule covering the whole subnet; `https://` to a LAN device with a self-signed certificate is trusted on first use and pinned; and `host-media` answers `unavailable` until OxidHome's media phase. With `tick_interval_ms` set, the host also ticks a streaming plugin early when a socket or HTTP response body it holds is readable.
 
 A `secret` field's value reaches the owning plugin in plain text through `host::config`; the host masks it in its API and scrubs it from plugin log output on a best-effort basis. Never log a credential or put one in an error message, event or device state.
 
@@ -179,7 +188,7 @@ Plugins in this repo follow semver from 1.0 onwards. Pre-1.0, breaking changes a
 
 - **Don't crash on bad input.** A malformed device response should be logged and ignored, not panic.
 - **Don't poll aggressively.** If your plugin polls a device, do it from `tick` with a sensible `tick_interval_ms` (>= 30s for most things) and let users tune it.
-- **Don't block.** Callbacks are synchronous; return promptly. The host's liveness watchdog reclaims an instance whose call doesn't return.
+- **Don't block.** Callbacks are synchronous; return promptly. The host's liveness watchdog reclaims an instance whose call doesn't return, but it can't interrupt a blocking socket call waiting inside the host: in `streaming-plugin`, use non-blocking sockets or set read and write timeouts.
 - **Report command outcomes honestly.** Return `err` only when the device was not touched, `unknown` when a command may have taken effect but can't be confirmed, and `accepted` plus a later `host::complete_command` when the device answers asynchronously.
 - **Persist what's needed, nothing more.** The KV storage interface has quotas. Don't store sensor history there — that's the host's job.
 - **Log usefully.** Use `oxidhome_sdk::tracing` after `oxidhome_sdk::logging::init()`, with appropriate levels: `info` for lifecycle, `debug` for normal operations, `warn` for recoverable issues, `error` for things the user needs to know about.

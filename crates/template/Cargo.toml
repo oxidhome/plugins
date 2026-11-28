@@ -15,7 +15,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-oxidhome-sdk.workspace = true
+oxidhome-sdk = { workspace = true, features = ["plugin"] }
 
 [dev-dependencies]
 oxidhome-manifest.workspace = true
