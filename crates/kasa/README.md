@@ -219,9 +219,13 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
 4. **Closed (oxidhome/oxidhome#223).** Camera HTTPS runs over `wasi:http`. The host
    trusts a camera's self-signed certificate on first use and pins it; for IP-literal
    URLs only the name check is skipped. Since oxidhome/oxidhome#242 the plugin uses the
-   SDK's HTTP client: a total timeout bounds each exchange (a trickling camera can't hold
-   a `tick` out of the watchdog's reach), `send_streaming` reads the live stream, and
-   `Error::may_have_reached_server` decides `err` versus `unknown`.
+   SDK's HTTP client, always through `send_streaming` so an error status is answered
+   without reading its body. The SDK's total timeout bounds each exchange up to the
+   response head, and the plugin bounds the rest of a LINKIE2 reply or snapshot by the
+   same deadline (a trickling camera can't hold a `tick` out of the watchdog's reach);
+   the live stream's body only has a 60 s idle timeout. `Error::may_have_reached_server`
+   decides `err` versus `unknown` up to the head; a body that fails after it counts as
+   sent.
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
    plugin computes both itself and sends them in its own requests, so the password does
