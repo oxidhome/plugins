@@ -115,7 +115,7 @@ when idle; later while another call holds the instance) the plugin makes the cal
 | The camera is off (`-40919`) | `err(unavailable)` |
 | PTZ argument or end stop (`-41203`) | `err(invalid-argument)` |
 | Unsupported (`-10008`) | `err(invalid-argument)` |
-| The call timed out after the request was sent, or the camera answered HTTP 5xx | `unknown`; a later `toggle` waits for the next read |
+| The call timed out after the request was sent, or the camera answered HTTP 5xx | `unknown`; a later `toggle` waits for the next read. A snapshot changes nothing, so it fails with `err(unavailable)` instead |
 
 A tick starts new network work only during its first 12 s, well inside the host's 30 s
 watchdog. Queued commands and due polls that don't fit wait for the next tick, in order.
@@ -223,9 +223,9 @@ of them by changing the WIT. Numbers are kept stable so code comments can refer 
    without reading its body. The SDK's total timeout bounds each exchange up to the
    response head, and the plugin bounds the rest of a LINKIE2 reply or snapshot by the
    same deadline (a trickling camera can't hold a `tick` out of the watchdog's reach);
-   the live stream's body only has a 60 s idle timeout. `Error::may_have_reached_server`
-   decides `err` versus `unknown` up to the head; a body that fails after it counts as
-   sent.
+   the live stream's body only has a 60 s idle timeout. For camera writes,
+   `Error::may_have_reached_server` decides `err` versus `unknown` up to the head; a body
+   that fails after it counts as sent.
 5. **`credential-ref` sends the password as-is (Phase 9).** A host-run source on 19443
    would need the base64-encoded password, and talk on 18443 needs the md5 hex. The
    plugin computes both itself and sends them in its own requests, so the password does
